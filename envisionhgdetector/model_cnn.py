@@ -105,7 +105,7 @@ class EnhancedPreprocessing(layers.Layer):
     def call(
         self, 
         x: tf.Tensor,
-        training: Optional[bool] = None,
+        training: Optional[bool] = False,
         mask: Optional[tf.Tensor] = None
     ) -> tf.Tensor:
         features = x
