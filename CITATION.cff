@@ -17,6 +17,6 @@ authors:
 - family-names: "Owoyele"
   given-names: "Babajide"
 title: "EnvisionHGdetector: A Computational Framework for Co-speech Gesture Detection, Kinematic Analysis, and Interactive Visualization"
-version: 3.0.0.0
+version: 3.0.1
 date-released: 19-02-2026
 url: "https://pypi.org/project/envisionhgdetector/"
