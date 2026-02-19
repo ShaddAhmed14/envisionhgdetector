@@ -11,6 +11,7 @@ import time
 from .config import Config
 from .model_cnn import GestureModel  # Renamed CNN model
 from .model_lightgbm import LightGBMGestureModel  # New LightGBM model
+from .model_combined import CombinedGestureModel, CombinedConfig  # Combined model
 from .preprocessing import VideoProcessor, create_sliding_windows
 from .utils import (
     create_segments, get_prediction_at_threshold, create_elan_file, 
@@ -19,6 +20,7 @@ from .utils import (
     setup_dashboard_folders, joint_map, calc_mcneillian_space, calc_vert_height,
     calc_volume_size, calc_holds
 )
+from .label_video_combined import label_video_combined  # Dual-panel for combined model
 
 # Standard library imports
 import json
@@ -47,25 +49,43 @@ def apply_smoothing(series: pd.Series, window: int = 5) -> pd.Series:
     
 
 class GestureDetector:
-    """Main class for gesture detection in videos - supports both CNN and LightGBM."""
+    """Main class for gesture detection in videos - supports CNN, LightGBM, and Combined models."""
     
     def __init__(
         self,
-        model_type: str = "cnn",  # NEW: "cnn" or "lightgbm"
+        model_type: str = "cnn",  # "cnn", "lightgbm", or "combined"
         motion_threshold: Optional[float] = None,
         gesture_threshold: Optional[float] = None,
         min_gap_s: Optional[float] = None,
         min_length_s: Optional[float] = None,
         gesture_class_bias: float = 0.0,
+        # Combined model specific thresholds
+        cnn_motion_threshold: Optional[float] = None,
+        cnn_gesture_threshold: Optional[float] = None,
+        lgbm_threshold: Optional[float] = None,
         config: Optional[Config] = None
     ):
-        """Initialize detector with model type selection."""
+        """
+        Initialize detector with model type selection.
+        
+        Args:
+            model_type: "cnn", "lightgbm", or "combined"
+            motion_threshold: Threshold for motion detection (CNN/LightGBM single model)
+            gesture_threshold: Threshold for gesture classification (CNN single model)
+            min_gap_s: Minimum gap between segments to merge
+            min_length_s: Minimum segment length
+            gesture_class_bias: Bias towards gesture class (CNN only)
+            cnn_motion_threshold: Motion threshold for CNN (combined model)
+            cnn_gesture_threshold: Gesture threshold for CNN (combined model)
+            lgbm_threshold: Confidence threshold for LightGBM (combined model)
+            config: Configuration object
+        """
         self.config = config or Config()
         self.model_type = model_type.lower()
         
         # Validate model type
-        if self.model_type not in ["cnn", "lightgbm"]:
-            raise ValueError(f"Unknown model type: {model_type}. Use 'cnn' or 'lightgbm'")
+        if self.model_type not in ["cnn", "lightgbm", "combined"]:
+            raise ValueError(f"Unknown model type: {model_type}. Use 'cnn', 'lightgbm', or 'combined'")
         
         self.params = {
             'motion_threshold': motion_threshold or self.config.default_motion_threshold,
@@ -76,7 +96,23 @@ class GestureDetector:
         }
         
         # Initialize model based on type
-        if self.model_type == "lightgbm":
+        if self.model_type == "combined":
+            # Create combined config with separate thresholds
+            combined_config = CombinedConfig(
+                cnn_weights_path=self.config.weights_path,
+                lgbm_weights_path=self.config.lightgbm_weights_path,
+                cnn_motion_threshold=cnn_motion_threshold or self.params['motion_threshold'],
+                cnn_gesture_threshold=cnn_gesture_threshold or self.params['gesture_threshold'],
+                lgbm_threshold=lgbm_threshold or self.params['motion_threshold'],
+                min_gap_s=self.params['min_gap_s'],
+                min_length_s=self.params['min_length_s']
+            )
+            self.model = CombinedGestureModel(combined_config)
+            self.video_processor = None
+            print(f"Initialized Combined (CNN+LightGBM) gesture detector")
+            print(f"  CNN thresholds: motion={combined_config.cnn_motion_threshold}, gesture={combined_config.cnn_gesture_threshold}")
+            print(f"  LightGBM threshold: {combined_config.lgbm_threshold}")
+        elif self.model_type == "lightgbm":
             self.model = LightGBMGestureModel(self.config)
             self.video_processor = None  # LightGBM handles its own processing
             print(f"Initialized LightGBM gesture detector")
@@ -86,6 +122,22 @@ class GestureDetector:
             print(f"Initialized CNN gesture detector")
             
         self.target_fps = 25.0
+    
+    def set_thresholds(
+        self,
+        cnn_motion_threshold: Optional[float] = None,
+        cnn_gesture_threshold: Optional[float] = None,
+        lgbm_threshold: Optional[float] = None
+    ):
+        """Update thresholds (combined model only)."""
+        if self.model_type == "combined":
+            self.model.set_thresholds(
+                cnn_motion_threshold=cnn_motion_threshold,
+                cnn_gesture_threshold=cnn_gesture_threshold,
+                lgbm_threshold=lgbm_threshold
+            )
+        else:
+            print(f"Warning: set_thresholds only applies to combined model")
     
     def _create_windows(self, features: List[List[float]], seq_length: int, stride: int) -> np.ndarray:
         """Creates sliding windows from feature sequences (CNN only)."""
@@ -107,15 +159,198 @@ class GestureDetector:
         self,
         video_path: str,
         stride: int = 1
-    ) -> Tuple[pd.DataFrame, Dict[str, float], pd.DataFrame, np.ndarray]:
+    ) -> Tuple[pd.DataFrame, Dict[str, float], pd.DataFrame, np.ndarray, List[float]]:
         """
         Process single video and return predictions.
         Automatically routes to appropriate model implementation.
+        
+        Returns:
+            Tuple of (predictions_df, stats, segments_df, features_array, timestamps)
         """
-        if self.model_type == "lightgbm":
+        if self.model_type == "combined":
+            return self._predict_video_combined(video_path, stride)
+        elif self.model_type == "lightgbm":
             return self._predict_video_lightgbm(video_path, stride)
         else:
             return self._predict_video_cnn(video_path, stride)
+    
+    def _predict_video_combined(
+        self,
+        video_path: str,
+        stride: int = 1
+    ) -> Tuple[pd.DataFrame, Dict[str, float], pd.DataFrame, np.ndarray, List[float]]:
+        """
+        Combined CNN+LightGBM prediction - outputs BOTH models' results separately.
+        No ensemble - user can compare both models.
+        
+        Returns:
+            Tuple of (raw_df, stats, segments_df, raw_predictions, timestamps)
+        """
+        # Get predictions from combined model
+        results = self.model.predict_video(video_path, target_fps=int(self.target_fps), return_all=True)
+        
+        if results['processed_frames'] == 0:
+            return pd.DataFrame(), {"error": "No features detected"}, pd.DataFrame(), np.array([]), []
+        
+        fps = results['original_fps']
+        rows = []
+        timestamps = []
+        
+        for pred in results['predictions']:
+            cnn = pred.get('cnn', {})
+            lgbm = pred.get('lightgbm', {})
+            time_s = pred['time_s']
+            timestamps.append(time_s)
+            
+            # Build row with BOTH models' results
+            row = {
+                'time': time_s,
+            }
+            
+            # Add CNN results
+            if cnn:
+                row.update({
+                    'has_motion': cnn.get('has_motion', 0.0),
+                    'Gesture_confidence': cnn.get('gesture_prob', 0.0) * cnn.get('has_motion', 1.0),
+                    'Move_confidence': cnn.get('move_prob', 0.0) * cnn.get('has_motion', 1.0),
+                    'NoGesture_confidence': 1 - cnn.get('has_motion', 0.0),
+                    'cnn_class': cnn.get('class', 'NoGesture'),
+                    'cnn_confidence': cnn.get('confidence', 0.0),
+                })
+            
+            # Add LightGBM results
+            if lgbm:
+                row.update({
+                    'lgbm_class': lgbm.get('class', 'NoGesture'),
+                    'lgbm_confidence': lgbm.get('confidence', 0.0),
+                    'lgbm_nogesture_prob': lgbm.get('nogesture_prob', 0.0),
+                    'lgbm_gesture_prob': lgbm.get('gesture_prob', 0.0),
+                })
+            
+            rows.append(row)
+        
+        if not rows:
+            return pd.DataFrame(), {"error": "No predictions generated"}, pd.DataFrame(), np.array([]), []
+        
+        raw_df = pd.DataFrame(rows)
+        
+        # Create segments for BOTH models separately
+        cnn_segments = self._create_segments_from_predictions(
+            raw_df, 'cnn_class', 
+            self.model.config.cnn_motion_threshold
+        ) if 'cnn_class' in raw_df.columns else pd.DataFrame()
+        
+        lgbm_segments = self._create_segments_from_predictions(
+            raw_df, 'lgbm_class',
+            self.model.config.lgbm_threshold
+        ) if 'lgbm_class' in raw_df.columns else pd.DataFrame()
+        
+        # Add model source to segments
+        if not cnn_segments.empty:
+            cnn_segments['model'] = 'CNN'
+        if not lgbm_segments.empty:
+            lgbm_segments['model'] = 'LightGBM'
+        
+        # Combine segments (user can filter by 'model' column)
+        segments_df = pd.concat([cnn_segments, lgbm_segments], ignore_index=True)
+        
+        # Stats
+        stats = {
+            'total_frames': results['total_frames'],
+            'processed_frames': results['processed_frames'],
+            'fps': fps,
+            'duration': results['total_frames'] / fps if fps > 0 else 0,
+            'cnn_available': results['cnn_available'],
+            'lgbm_available': results['lgbm_available'],
+            'cnn_motion_threshold': self.model.config.cnn_motion_threshold,
+            'cnn_gesture_threshold': self.model.config.cnn_gesture_threshold,
+            'lgbm_threshold': self.model.config.lgbm_threshold,
+        }
+        
+        # Raw predictions array for compatibility
+        if 'has_motion' in raw_df.columns:
+            raw_predictions = raw_df[['has_motion', 'Gesture_confidence', 'Move_confidence']].values
+        else:
+            raw_predictions = np.array([])
+        
+        return raw_df, stats, segments_df, raw_predictions, timestamps
+    
+    def _create_segments_from_predictions(
+        self, 
+        raw_df: pd.DataFrame, 
+        class_column: str,
+        threshold: float
+    ) -> pd.DataFrame:
+        """Create segments from a specific model's predictions."""
+        if raw_df.empty or class_column not in raw_df.columns:
+            return pd.DataFrame(columns=['start_time', 'end_time', 'label', 'labelid', 'duration'])
+        
+        segments = []
+        segment_id = 1
+        in_gesture = False
+        start_idx = 0
+        
+        min_length_s = self.params['min_length_s']
+        min_gap_s = self.params['min_gap_s']
+        
+        for idx, row in raw_df.iterrows():
+            is_gesture = row[class_column] != 'NoGesture'
+            
+            if is_gesture and not in_gesture:
+                in_gesture = True
+                start_idx = idx
+            elif not is_gesture and in_gesture:
+                in_gesture = False
+                start_time = raw_df.loc[start_idx, 'time']
+                end_time = raw_df.loc[idx - 1, 'time'] if idx > 0 else raw_df.loc[idx, 'time']
+                duration = end_time - start_time
+                
+                if duration >= min_length_s:
+                    # Get majority label in segment
+                    segment_data = raw_df.loc[start_idx:idx-1]
+                    label = segment_data[class_column].mode().iloc[0] if not segment_data[class_column].mode().empty else 'Gesture'
+                    
+                    segments.append({
+                        'start_time': start_time,
+                        'end_time': end_time,
+                        'label': label,
+                        'labelid': segment_id,
+                        'duration': duration
+                    })
+                    segment_id += 1
+        
+        # Handle gesture at end
+        if in_gesture:
+            start_time = raw_df.loc[start_idx, 'time']
+            end_time = raw_df.iloc[-1]['time']
+            duration = end_time - start_time
+            
+            if duration >= min_length_s:
+                segments.append({
+                    'start_time': start_time,
+                    'end_time': end_time,
+                    'label': 'Gesture',
+                    'labelid': segment_id,
+                    'duration': duration
+                })
+        
+        # Merge close segments
+        if len(segments) > 1:
+            merged = []
+            current = segments[0]
+            
+            for next_seg in segments[1:]:
+                gap = next_seg['start_time'] - current['end_time']
+                if gap <= min_gap_s:
+                    current['end_time'] = next_seg['end_time']
+                    current['duration'] = current['end_time'] - current['start_time']
+                else:
+                    merged.append(current)
+                    current = next_seg
+            merged.append(current)
+            segments = merged
+        
+        return pd.DataFrame(segments) if segments else pd.DataFrame(columns=['start_time', 'end_time', 'label', 'labelid', 'duration'])
     
     def _predict_video_cnn(
         self,
@@ -197,8 +432,9 @@ class GestureDetector:
         # Create segments
         segments = create_segments(
             results_df,
-            min_length_s=self.params['min_length_s'],
-            label_column='label'
+            label_column='label',
+            min_gap_s=self.params['min_gap_s'],
+            min_length_s=self.params['min_length_s']
         )
 
         # Calculate statistics
@@ -316,8 +552,9 @@ class GestureDetector:
         # Create segments
         segments = create_segments(
             results_df,
-            min_length_s=self.params['min_length_s'],
-            label_column='label'
+            label_column='label',
+            min_gap_s=self.params['min_gap_s'],
+            min_length_s=self.params['min_length_s']
         )
 
         # Calculate statistics
@@ -385,16 +622,33 @@ class GestureDetector:
                         f"labeled_{video_name}"
                     )
  
-                    label_video(
-                        video_path, 
-                        segments, 
-                        output_pathvid,
-                        predictions_df,
-                        valid_timestamps=timestamps,
-                        motion_threshold=self.params['motion_threshold'],
-                        gesture_threshold=self.params['gesture_threshold'],
-                        target_fps=25.0
-                    )
+                    if self.model_type == "combined":
+                        # Use dual-panel animation for combined model
+                        from .label_video_combined import label_video_combined
+                        label_video_combined(
+                            video_path,
+                            predictions_df,
+                            output_pathvid,
+                            cnn_motion_threshold=self.model.config.cnn_motion_threshold,
+                            cnn_gesture_threshold=self.model.config.cnn_gesture_threshold,
+                            lgbm_threshold=self.model.config.lgbm_threshold,
+                            min_gap_s=self.params['min_gap_s'],
+                            min_length_s=self.params['min_length_s'],
+                            window_duration=10.0,
+                            target_fps=25.0
+                        )
+                    else:
+                        # Use standard label_video for single models
+                        label_video(
+                            video_path, 
+                            segments, 
+                            output_pathvid,
+                            predictions_df,
+                            valid_timestamps=timestamps,
+                            motion_threshold=self.params['motion_threshold'],
+                            gesture_threshold=self.params['gesture_threshold'],
+                            target_fps=25.0
+                        )
                     
                     print("Generating ELAN file...")
                     # Create ELAN file

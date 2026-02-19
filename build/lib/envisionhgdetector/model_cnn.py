@@ -1,212 +1,270 @@
 # envisionhgdetector/envisionhgdetector/model.py
+"""
+Gesture detection CNN model.
+Architecture matches best performing config from hyperparameter search.
+
+Best model: World landmarks (92 features) with residual CNN blocks.
+"""
 
 import tensorflow as tf
 from tensorflow.keras import layers, regularizers, Model
-from typing import Optional
+from typing import Optional, Tuple
 import numpy as np
-from .config import Config
-from typing import Tuple
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+class Config:
+    """Model configuration matching best hyperparameter search result."""
+    
+    # Input settings
+    seq_length: int = 25
+    num_features: int = 92  # World landmarks: 23 × 4
+    
+    # Labels
+    gesture_labels: Tuple[str, str] = ("Gesture", "Move")  # Motion classes (excluding NoGesture)
+    all_labels: Tuple[str, str, str] = ("NoGesture", "Gesture", "Move")
+    
+    # Model architecture (from best config)
+    conv_filters: Tuple[int, int, int] = (48, 96, 192)
+    conv_kernel_size: int = 3
+    pool_size: int = 2
+    dense_units: int = 128
+    dropout_rate: float = 0.5
+    l2_weight: float = 0.001
+    
+    # Preprocessing
+    preprocessing: str = "basic"
+    
+    # Weights path (to be set by user or default location)
+    weights_path: Optional[str] = None
+
+
+# ============================================================================
+# PREPROCESSING LAYERS
+# ============================================================================
+
+class BasicPreprocessing(layers.Layer):
+    """
+    Basic preprocessing - adds noise during training.
+    This matches the training script's BasicPreprocessing.
+    """
+    def __init__(self, noise_stddev: float = 0.025, **kwargs):
+        super(BasicPreprocessing, self).__init__(**kwargs)
+        self.noise_stddev = noise_stddev
+        
+    def call(self, inputs, training=None):
+        if training:
+            noise = tf.random.normal(
+                shape=tf.shape(inputs),
+                mean=0.0,
+                stddev=self.noise_stddev,
+                dtype=tf.float32
+            )
+            inputs = inputs + noise
+        return inputs
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({'noise_stddev': self.noise_stddev})
+        return config
+
 
 class EnhancedPreprocessing(layers.Layer):
+    """
+    Enhanced preprocessing with derivatives and augmentation.
+    """
     def __init__(
         self,
-        time_warp_range: Tuple[float, float] = (0.9, 1.1),    # Less aggressive time warping
-        rotation_range: Tuple[float, float] = (-0.05, 0.05),  # Smaller rotation range
-        jitter_sigma: float = 0.005,                          # Smaller jitter for normalized distances
-        drop_prob: float = 0.03,                              # Lower drop probability
-        noise_stddev: float = 0.01,                           # Lower noise for normalized features
-        scale_range: Tuple[float, float] = (0.98, 1.02),      # Smaller scale range
-        mask_max_size: int = 2                                # Shorter mask length
-    ) -> None:
-        super(EnhancedPreprocessing, self).__init__(name="enhanced_preprocessing")
-        self.time_warp_range = time_warp_range
-        self.rotation_range = rotation_range
-        self.jitter_sigma = jitter_sigma
-        self.drop_prob = drop_prob
+        noise_stddev: float = 0.005,
+        jitter_sigma: float = 0.001,
+        scale_range: Tuple[float, float] = (0.995, 1.005),
+        drop_prob: float = 0.01,
+        **kwargs
+    ):
+        super(EnhancedPreprocessing, self).__init__(**kwargs)
         self.noise_stddev = noise_stddev
+        self.jitter_sigma = jitter_sigma
         self.scale_range = scale_range
-        self.mask_max_size = mask_max_size
+        self.drop_prob = drop_prob
 
-    def time_warp(self, features: tf.Tensor) -> tf.Tensor:
-        """Apply random temporal warping."""
-        warp = tf.random.uniform([], self.time_warp_range[0], self.time_warp_range[1])
-        seq_len = tf.shape(features)[1]
-        warped = tf.image.resize(
-            features[:, :, :, tf.newaxis], 
-            [seq_len, tf.shape(features)[2]]
-        )[:, :, :, 0]
-        return warped
-
-    def add_position_jitter(self, features: tf.Tensor) -> tf.Tensor:
-        """Add random jitter to positions."""
-        jitter = tf.random.normal(tf.shape(features), mean=0.0, stddev=self.jitter_sigma)
-        return features + jitter
-
-    def random_frame_drop(self, features: tf.Tensor) -> tf.Tensor:
-        """Randomly drop frames to simulate tracking failures."""
-        mask = tf.random.uniform(tf.shape(features)[:2]) > self.drop_prob
-        mask = tf.cast(mask, features.dtype)
-        return features * mask[:, :, tf.newaxis]
-
-    def time_masking(self, features: tf.Tensor) -> tf.Tensor:
-        """Apply random time masking."""
-        batch_size = tf.shape(features)[0]
-        seq_len = tf.shape(features)[1]
-        feature_dim = tf.shape(features)[2]
+    def call(self, inputs, training=None):
+        x = inputs
         
-        mask_size = tf.random.uniform([], 1, self.mask_max_size, dtype=tf.int32)
-        starts = tf.random.uniform([batch_size], 0, seq_len - mask_size, dtype=tf.int32)
+        # Center features
+        x = x - tf.reduce_mean(x, axis=-2, keepdims=True)
         
-        mask = tf.ones([batch_size, seq_len, feature_dim])
-        
-        for i in range(batch_size):
-            start = starts[i]
-            indices = tf.range(start, start + mask_size)
-            mask_updates = tf.zeros([mask_size, feature_dim])
-            mask = tf.tensor_scatter_nd_update(
-                mask,
-                tf.stack([tf.repeat(i, mask_size), indices], axis=1),
-                mask_updates
-            )
-        
-        return features * mask
-
-    def compute_derivatives(self, features: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-        """Compute first and second derivatives."""
-        # First derivative
-        t_deriv = features[:, 1:] - features[:, :-1]
+        # Compute derivatives
+        t_deriv = x[:, 1:] - x[:, :-1]
         t_deriv = tf.pad(t_deriv, [[0, 0], [1, 0], [0, 0]])
-
-        # Second derivative
+        
         t_deriv_2 = t_deriv[:, 1:] - t_deriv[:, :-1]
         t_deriv_2 = tf.pad(t_deriv_2, [[0, 0], [1, 0], [0, 0]])
         
-        return t_deriv, t_deriv_2
-
-    def compute_statistics(
-        self, 
-        features: tf.Tensor, 
-        t_deriv: tf.Tensor, 
-        t_deriv_2: tf.Tensor
-    ) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-        """Compute statistical features."""
-        features_std = tf.math.reduce_std(features, axis=-2, keepdims=True)
-        t_deriv_std = tf.math.reduce_std(t_deriv, axis=-2, keepdims=True)
-        t_deriv_std_2 = tf.math.reduce_std(t_deriv_2, axis=-2, keepdims=True)
-        
-        return features_std, t_deriv_std, t_deriv_std_2
-
-    def normalize_features(self, features: tf.Tensor) -> tf.Tensor:
-        """Apply feature normalization."""
-        mean = tf.reduce_mean(features, axis=-1, keepdims=True)
-        std = tf.math.reduce_std(features, axis=-1, keepdims=True) + 1e-8
-        return (features - mean) / std
-
-    def call(
-        self, 
-        x: tf.Tensor,
-        training: Optional[bool] = None,
-        mask: Optional[tf.Tensor] = None
-    ) -> tf.Tensor:
-        features = x
-        
-        # Center the features
-        features = features - tf.reduce_mean(features, axis=-2, keepdims=True)
-        
-        # Compute derivatives and statistics
-        t_deriv, t_deriv_2 = self.compute_derivatives(features)
-        features_std, t_deriv_std, t_deriv_std_2 = self.compute_statistics(
-            features, t_deriv, t_deriv_2
-        )
-        
-        # Concatenate all features
-        features = tf.concat([
-            features,
-            t_deriv,
-            t_deriv_2,
-            tf.broadcast_to(features_std, tf.shape(features)),
-            tf.broadcast_to(t_deriv_std, tf.shape(features)),
-            tf.broadcast_to(t_deriv_std_2, tf.shape(features))
-        ], axis=-1)
+        # Concatenate features with derivatives
+        x = tf.concat([x, t_deriv, t_deriv_2], axis=-1)
         
         if training:
-            # Apply augmentations
-            features = self.time_warp(features)
-            features = self.add_position_jitter(features)
-            features = self.random_frame_drop(features)
-            
             # Add noise
-            features = features + tf.random.normal(
-                tf.shape(features), 
-                mean=0.0, 
-                stddev=self.noise_stddev
-            )
+            x = x + tf.random.normal(tf.shape(x), stddev=self.noise_stddev)
             
             # Random scaling
-            scale = tf.random.uniform(
-                [], 
-                self.scale_range[0], 
-                self.scale_range[1], 
-                dtype=tf.float32
-            )
-            features = features * scale
+            scale = tf.random.uniform([], self.scale_range[0], self.scale_range[1])
+            x = x * scale
             
-            # Apply time masking
-            features = self.time_masking(features)
+            # Random frame drop
+            mask = tf.cast(tf.random.uniform(tf.shape(x)[:2]) > self.drop_prob, x.dtype)
+            x = x * mask[:, :, tf.newaxis]
         
-        # Final normalization
-        features = self.normalize_features(features)
+        # Normalize
+        mean = tf.reduce_mean(x, axis=-1, keepdims=True)
+        std = tf.math.reduce_std(x, axis=-1, keepdims=True) + 1e-8
+        x = (x - mean) / std
         
-        return features
+        return x
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'noise_stddev': self.noise_stddev,
+            'jitter_sigma': self.jitter_sigma,
+            'scale_range': self.scale_range,
+            'drop_prob': self.drop_prob
+        })
+        return config
 
-def make_model(weights_path: Optional[str] = None) -> Model:
-    seq_input = layers.Input(
-        shape=(Config.seq_length, Config.num_original_features),
-        dtype=tf.float32, name="input"
-    )
-    x = seq_input
-    
-    # Replace old preprocessing with enhanced version for augmentation
-    x = EnhancedPreprocessing()(x)
-    
-    # block 1
-    x = layers.Conv1D(48, 3, strides=1, padding="same", activation="relu",
-                     kernel_regularizer=regularizers.l2(0.0005))(x)  # Light L2
-    x = layers.BatchNormalization()(x)  # Add BN but keep MaxPooling same
-    x = layers.MaxPooling1D(pool_size=2, strides=1, padding='same')(x)
-    
-    # block 2
-    x = layers.Conv1D(96, 3, strides=1, padding="same", activation="relu",
-                     kernel_regularizer=regularizers.l2(0.0005))(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.MaxPooling1D(pool_size=2, strides=1, padding='same')(x)
-    
-    # block 3
-    x = layers.Conv1D(192, 3, strides=1, padding="same", activation="relu", 
-                     kernel_regularizer=regularizers.l2(0.001))(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.MaxPooling1D(pool_size=2, strides=1, padding='same')(x)
-    x = layers.Flatten()(x)
 
-    x = layers.Dense(256, activation="relu")(x)
-    x = layers.Dropout(0.4)(x)  # Slightly reduced from 0.5
+# ============================================================================
+# MODEL FACTORY
+# ============================================================================
 
+def make_model(
+    weights_path: Optional[str] = None,
+    num_features: int = 92,
+    num_gesture_classes: int = 2,
+    seq_length: int = 25,
+    preprocessing: str = "basic",
+    conv_filters: Tuple[int, int, int] = (48, 96, 192),
+    dense_units: int = 128,
+    dropout_rate: float = 0.5,
+    l2_weight: float = 0.001
+) -> Model:
+    """
+    Create the gesture detection CNN model with residual blocks.
+    
+    Architecture matches best config from hyperparameter search:
+    - Residual convolutional blocks with skip connections
+    - Global average + max pooling
+    - Hierarchical output (has_motion + gesture_probs)
+    
+    Args:
+        weights_path: Path to load pretrained weights
+        num_features: Number of input features (92 for world landmarks)
+        num_gesture_classes: Number of gesture classes (2: Gesture, Move)
+        seq_length: Sequence length (25 frames)
+        preprocessing: "basic" or "enhanced"
+        conv_filters: Tuple of filter counts for conv blocks
+        dense_units: Dense layer units
+        dropout_rate: Dropout rate
+        l2_weight: L2 regularization weight
+    
+    Returns:
+        Compiled Keras Model
+    """
+    inputs = layers.Input(shape=(seq_length, num_features), name="input")
+    
+    # ========================================================================
+    # PREPROCESSING
+    # ========================================================================
+    if preprocessing == "enhanced":
+        x = EnhancedPreprocessing()(inputs)
+    else:
+        x = BasicPreprocessing()(inputs)
+    
+    # ========================================================================
+    # RESIDUAL CONVOLUTIONAL BLOCKS
+    # ========================================================================
+    for i, filters in enumerate(conv_filters):
+        shortcut = x
+        
+        # Main path
+        x = layers.Conv1D(
+            filters,
+            3,
+            padding="same",
+            kernel_regularizer=regularizers.l2(l2_weight)
+        )(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation("relu")(x)
+        
+        # Spatial dropout for regularization
+        x = layers.SpatialDropout1D(0.1)(x)
+        
+        # Downsample via pooling
+        x = layers.MaxPooling1D(pool_size=2, strides=2, padding='same')(x)
+        
+        # Shortcut path (1x1 conv to match dimensions)
+        shortcut = layers.Conv1D(
+            filters, 
+            1, 
+            strides=2, 
+            padding="same",
+            kernel_regularizer=regularizers.l2(l2_weight)
+        )(shortcut)
+        shortcut = layers.BatchNormalization()(shortcut)
+        
+        # Merge
+        x = layers.Add()([x, shortcut])
+        x = layers.Activation("relu")(x)
+    
+    # ========================================================================
+    # POOLING AND HEAD
+    # ========================================================================
+    avg_pool = layers.GlobalAveragePooling1D()(x)
+    max_pool = layers.GlobalMaxPooling1D()(x)
+    x = layers.Concatenate()([avg_pool, max_pool])
+    x = layers.Dropout(dropout_rate)(x)
+    
+    x = layers.Dense(
+        dense_units, 
+        activation="relu",
+        kernel_regularizer=regularizers.l2(l2_weight)
+    )(x)
+    x = layers.Dropout(dropout_rate)(x)
+    
+    # ========================================================================
+    # HIERARCHICAL OUTPUT
+    # ========================================================================
+    # has_motion: binary (0=NoGesture, 1=Motion detected)
     has_motion = layers.Dense(1, activation="sigmoid", name="has_motion")(x)
-    gesture_probs = layers.Dense(len(Config.gesture_labels),
-                               activation="softmax", name="gesture_probs")(x)
-    output = layers.Concatenate()([has_motion, gesture_probs])
+    
+    # gesture_probs: softmax over motion types (Gesture, Move)
+    gesture_probs = layers.Dense(
+        num_gesture_classes,
+        activation="softmax", 
+        name="gesture_probs"
+    )(x)
+    
+    # Combined output: [has_motion, gesture_prob_0, gesture_prob_1]
+    outputs = layers.Concatenate(name="output")([has_motion, gesture_probs])
 
-    model = Model(seq_input, output)
+    model = Model(inputs, outputs)
     
     # Load weights if provided
     if weights_path:
         try:
             model.load_weights(weights_path)
-            print(f"Successfully loaded weights from {weights_path}")
+            print(f"✓ Loaded weights from {weights_path}")
         except Exception as e:
             raise RuntimeError(f"Failed to load model weights from {weights_path}: {str(e)}")
     
     return model
+
+
+# ============================================================================
+# MODEL WRAPPER CLASS
+# ============================================================================
 
 class GestureModel:
     """
@@ -214,10 +272,66 @@ class GestureModel:
     Handles model loading and inference.
     """
     
-    def __init__(self, config: Optional[Config] = None):
-        """Initialize the model with optional custom configuration."""
-        self.config = config or Config()
-        self.model = make_model(self.config.weights_path)
+    def __init__(
+        self, 
+        config_or_path=None,
+        num_features: Optional[int] = None,
+        feature_set: Optional[str] = None
+    ):
+        """
+        Initialize the model.
+        
+        Args:
+            config_or_path: Either a Config object, a path string to weights, or None
+            num_features: Number of input features (overrides config if provided)
+            feature_set: "basic" (41), "extended" (61), or "world" (92)
+        """
+        # Handle different input types
+        weights_path = None
+        
+        if config_or_path is None:
+            # Use defaults
+            feature_set = feature_set or "world"
+        elif isinstance(config_or_path, str):
+            # It's a path string
+            weights_path = config_or_path
+            feature_set = feature_set or "world"
+        elif hasattr(config_or_path, 'weights_path'):
+            # It's a Config object
+            weights_path = config_or_path.weights_path
+            feature_set = feature_set or getattr(config_or_path, 'feature_set', 'world')
+            if num_features is None:
+                num_features = getattr(config_or_path, 'num_original_features', None)
+        else:
+            raise ValueError(f"config_or_path must be None, a path string, or a Config object, got {type(config_or_path)}")
+        
+        # Set features based on feature_set if not explicitly provided
+        if num_features is None:
+            if feature_set == "world":
+                num_features = 92
+            elif feature_set == "extended":
+                num_features = 61
+            elif feature_set == "basic":
+                num_features = 41
+            else:
+                num_features = 92  # Default to world
+            
+        self.num_features = num_features
+        self.feature_set = feature_set
+        self.seq_length = 25
+        
+        # Labels
+        self.gesture_labels = ("Gesture", "Move")
+        self.all_labels = ("NoGesture", "Gesture", "Move")
+        
+        # Build model
+        self.model = make_model(
+            weights_path=weights_path,
+            num_features=num_features,
+            num_gesture_classes=len(self.gesture_labels),
+            seq_length=self.seq_length,
+            preprocessing="basic"
+        )
     
     def predict(self, features: np.ndarray) -> np.ndarray:
         """
@@ -227,6 +341,111 @@ class GestureModel:
             features: Input features of shape (batch_size, seq_length, num_features)
             
         Returns:
-            Model predictions
+            Model predictions of shape (batch_size, 3) where:
+                - [:, 0] = has_motion probability
+                - [:, 1] = Gesture probability (given motion)
+                - [:, 2] = Move probability (given motion)
         """
         return self.model.predict(features, verbose=0)
+    
+    def predict_classes(
+        self, 
+        features: np.ndarray, 
+        motion_threshold: float = 0.5
+    ) -> np.ndarray:
+        """
+        Predict class labels.
+        
+        Args:
+            features: Input features
+            motion_threshold: Threshold for motion detection
+            
+        Returns:
+            Array of class indices: 0=NoGesture, 1=Gesture, 2=Move
+        """
+        preds = self.predict(features)
+        has_motion = preds[:, 0] > motion_threshold
+        gesture_idx = np.argmax(preds[:, 1:], axis=1)
+        
+        # Combined class: 0=NoGesture, 1=Gesture, 2=Move
+        return np.where(has_motion, gesture_idx + 1, 0)
+    
+    def predict_with_confidence(
+        self, 
+        features: np.ndarray,
+        motion_threshold: float = 0.5
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Predict classes with confidence scores.
+        
+        Args:
+            features: Input features
+            motion_threshold: Threshold for motion detection
+            
+        Returns:
+            Tuple of (class_indices, confidence_scores)
+        """
+        preds = self.predict(features)
+        has_motion = preds[:, 0] > motion_threshold
+        motion_conf = preds[:, 0]
+        
+        gesture_idx = np.argmax(preds[:, 1:], axis=1)
+        gesture_conf = np.max(preds[:, 1:], axis=1)
+        
+        # Combined class
+        classes = np.where(has_motion, gesture_idx + 1, 0)
+        
+        # Confidence is motion_conf for NoGesture, gesture_conf * motion_conf for others
+        confidence = np.where(
+            has_motion,
+            motion_conf * gesture_conf,
+            1 - motion_conf
+        )
+        
+        return classes, confidence
+
+
+# ============================================================================
+# CUSTOM LOSS AND METRICS (for training/evaluation)
+# ============================================================================
+
+def hierarchical_loss(y_true, y_pred):
+    """
+    Hierarchical loss for training.
+    
+    y_true format: [has_motion, gesture_onehot...]
+        - NoGesture: [0, 0, 0] 
+        - Gesture:   [1, 1, 0]
+        - Move:      [1, 0, 1]
+    """
+    has_motion_true = y_true[:, :1]
+    has_motion_pred = y_pred[:, :1]
+    gesture_true = y_true[:, 1:]
+    gesture_pred = y_pred[:, 1:]
+    
+    # Motion loss - standard BCE
+    has_motion_loss = tf.keras.losses.BinaryCrossentropy(
+        reduction=tf.keras.losses.Reduction.NONE
+    )(has_motion_true, has_motion_pred)
+    
+    # Gesture loss - only for motion samples
+    mask = tf.cast(y_true[:, 0] == 1, tf.float32)
+    gesture_loss = tf.keras.losses.CategoricalCrossentropy(
+        label_smoothing=0.05,
+        reduction=tf.keras.losses.Reduction.NONE
+    )(gesture_true, gesture_pred, sample_weight=mask)
+    
+    return (has_motion_loss + gesture_loss) * 0.5
+
+
+def custom_accuracy(y_true, y_pred):
+    """
+    Custom accuracy metric matching training.
+    """
+    motion_threshold = 0.5
+    gesture_threshold = 0.5 
+    
+    y_pred_masked = tf.where(y_pred[:, :1] >= motion_threshold, y_pred, 0.0)
+    y_pred_binary = tf.where(y_pred_masked >= gesture_threshold, 1.0, 0.0)
+    
+    return tf.keras.metrics.categorical_accuracy(y_true[:, 1:], y_pred_binary[:, 1:])
