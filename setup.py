@@ -13,7 +13,7 @@ with open('README.md', 'r', encoding='utf-8') as f:
 
 setup(
     name="envisionhgdetector",
-    version="2.0.0.9",
+    version="3.0.0",
     author="Wim Pouw, Bosco Yung, Sharjeel Shaikh, James Trujillo, Antonio Rueda-Toicen, Gerard de Melo, Babajide Owoyele",
     author_email="wim.pouw@donders.ru.nl",
     description="Hand gesture detection using MediaPipe and CNN, kinematic analysis, and visualization.",
@@ -28,7 +28,7 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Scientific/Engineering :: Image Recognition",
     ],
-    python_requires=">=3.7",
+    python_requires=">=3.10",
     install_requires=required,
     include_package_data=True,
     package_data={

@@ -1,72 +1,125 @@
 # envisionhgdetector/config.py
+"""
+Configuration for the gesture detection system.
+Supports three feature sets: basic (41), extended (61), world (92).
+"""
 
-from dataclasses import dataclass
-from typing import Tuple
-from importlib.resources import files  # if using Python 3.9+
-# or from pkg_resources import resource_filename  # for older Python versions
+from dataclasses import dataclass, field
+from typing import Tuple, Optional
+from importlib.resources import files
 import os
 
 @dataclass
 class Config:
     """Configuration for the gesture detection system."""
     
-    # Model configuration
+    # ========================================================================
+    # MODEL CONFIGURATION - CHANGE THESE TO SWITCH MODELS
+    # ========================================================================
+    
+    # Feature set: "basic" (41), "extended" (61), or "world" (92)
+    feature_set: str = "world"  # Best performing model
+    
+    # CNN model filename (in envisionhgdetector/model/)
+    # Set to None to use default based on feature_set
+    cnn_model_filename: Optional[str] = None
+    
+    # LightGBM model filename (in envisionhgdetector/model/)
+    lightgbm_model_filename: Optional[str] = "R2_best_lightgbm_model_config13.pkl"
+    
+    # ========================================================================
+    # GESTURE LABELS
+    # ========================================================================
     gesture_labels: Tuple[str, ...] = ("Gesture", "Move")
+    all_labels: Tuple[str, ...] = ("NoGesture", "Gesture", "Move")
     undefined_gesture_label: str = "Undefined"
     stationary_label: str = "NoGesture"
-    seq_length: int = 25  # Window size for classification
-    num_original_features: int = 29  # Number of input features
     
-    # Default thresholds (can be overridden in detector)
+    # ========================================================================
+    # MODEL PARAMETERS
+    # ========================================================================
+    seq_length: int = 25  # Window size for classification
+    
+    # Number of input features (set automatically based on feature_set)
+    num_original_features: int = 92
+    
+    # Model architecture (for world landmarks - best config)
+    conv_filters: Tuple[int, int, int] = (48, 96, 192)
+    dense_units: int = 128
+    dropout_rate: float = 0.5
+    l2_weight: float = 0.001
+    preprocessing: str = "basic"
+    
+    # ========================================================================
+    # DEFAULT THRESHOLDS
+    # ========================================================================
     default_motion_threshold: float = 0.7
     default_gesture_threshold: float = 0.7
     default_min_gap_s: float = 0.5
     default_min_length_s: float = 0.5
     
+    # Internal: resolved paths (set in __post_init__)
+    weights_path: Optional[str] = field(default=None, init=False)
+    lightgbm_weights_path: Optional[str] = field(default=None, init=False)
+    
     def __post_init__(self):
         """Setup paths after initialization."""
-        # CNN model weights path
-        try:
-            # Using importlib.resources (Python 3.9+)
-            self.weights_path = str(files('envisionhgdetector').joinpath('model/model_weights_20250224_103340.h5'))
-        except:
-            # Fallback for older Python versions or if file doesn't exist
-            try:
-                # Or using pkg_resources (older Python versions)
-                # self.weights_path = resource_filename('envisionhgdetector', 'model/SAGAplus_gesturenogesture_trained_binaryCNNmodel_weightsv1.h5')
-                self.weights_path = str(files('envisionhgdetector').joinpath('model/model_weights_20250224_103340.h5'))
-            except:
-                # Final fallback - check if file exists in expected locations
-                possible_paths = [
-                    os.path.join(os.path.dirname(__file__), 'model', 'model_weights_20250224_103340.h5'),
-                    'model_weights_20250224_103340.h5'
-                ]
-                self.weights_path = None
-                for path in possible_paths:
-                    if os.path.exists(path):
-                        self.weights_path = path
-                        break
         
-        # LightGBM model weights path
-        try:
-            # Using importlib.resources (Python 3.9+)
-            self.lightgbm_weights_path = str(files('envisionhgdetector').joinpath('model/lightgbm_gesture_model_v1.pkl'))
-            # Check if file actually exists
-            if not os.path.exists(self.lightgbm_weights_path):
-                self.lightgbm_weights_path = None
-        except:
-            # Fallback - check if file exists in expected locations
-            possible_paths = [
-                os.path.join(os.path.dirname(__file__), 'model', 'lightgbm_gesture_model_v1.pkl'),
-                'lightgbm_gesture_model_v1.pkl'
-            ]
-            self.lightgbm_weights_path = None
-            for path in possible_paths:
-                if os.path.exists(path):
-                    self.lightgbm_weights_path = path
-                    break
+        # Set number of features based on feature_set
+        if self.feature_set == "world":
+            self.num_original_features = 92
+        elif self.feature_set == "extended":
+            self.num_original_features = 61
+        else:  # basic
+            self.num_original_features = 41
+        
+        # Set default model filename based on feature_set if not specified
+        if self.cnn_model_filename is None:
+            self.cnn_model_filename = "R2_CNN_world_best_config18.h5"
+           
+        # ====================================================================
+        # CNN MODEL PATH
+        # ====================================================================
+        self.weights_path = self._resolve_model_path(self.cnn_model_filename)
+        
+        # ====================================================================
+        # LIGHTGBM MODEL PATH
+        # ====================================================================
+        if self.lightgbm_model_filename:
+            self.lightgbm_weights_path = self._resolve_model_path(self.lightgbm_model_filename)
     
-    def get_model_path(self, model_type: str):
+    def _resolve_model_path(self, filename: str) -> Optional[str]:
+        """
+        Resolve model path from filename.
+        Tries multiple locations in order of preference.
+        """
+        if filename is None:
+            return None
+            
+        # Try importlib.resources first (Python 3.9+)
+        try:
+            path = str(files('envisionhgdetector').joinpath(f'model/{filename}'))
+            if os.path.exists(path):
+                return path
+        except:
+            pass
+        
+        # Fallback - check common locations
+        possible_paths = [
+            os.path.join(os.path.dirname(__file__), 'model', filename),
+            os.path.join(os.path.dirname(__file__), filename),
+            filename,
+            os.path.join('model', filename),
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+        
+        # Return expected path even if doesn't exist (for error messages)
+        return os.path.join(os.path.dirname(__file__), 'model', filename)
+    
+    def get_model_path(self, model_type: str = "cnn") -> Optional[str]:
         """Get the appropriate model path based on model type."""
         if model_type.lower() == "lightgbm":
             return self.lightgbm_weights_path
@@ -75,7 +128,7 @@ class Config:
         else:
             raise ValueError(f"Unknown model type: {model_type}")
     
-    def is_model_available(self, model_type: str) -> bool:
+    def is_model_available(self, model_type: str = "cnn") -> bool:
         """Check if a model is available."""
         path = self.get_model_path(model_type)
         return path is not None and os.path.exists(path)
@@ -99,3 +152,21 @@ class Config:
             'min_gap_s': self.default_min_gap_s,
             'min_length_s': self.default_min_length_s
         }
+    
+    def __repr__(self):
+        """Pretty print configuration."""
+        return (
+            f"Config(\n"
+            f"  feature_set='{self.feature_set}',\n"
+            f"  num_features={self.num_original_features},\n"
+            f"  seq_length={self.seq_length},\n"
+            f"  cnn_model='{self.cnn_model_filename}',\n"
+            f"  lightgbm_model='{self.lightgbm_model_filename}',\n"
+            f"  cnn_available={self.is_model_available('cnn')},\n"
+            f"  lightgbm_available={self.is_model_available('lightgbm')}\n"
+            f")"
+        )
+
+
+# Default configuration instance
+DEFAULT_CONFIG = Config()

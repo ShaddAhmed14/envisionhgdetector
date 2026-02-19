@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Test script for the current EnvisionHGDetector setup.
-This works with your existing installed package and shows what needs to be updated.
+Tests configuration, model availability, and detector initialization.
 """
 
 import os
 import sys
+
 
 def test_current_setup():
     """Test the current installation and identify what needs updating."""
@@ -16,83 +17,136 @@ def test_current_setup():
         print("EnvisionHGDetector Current Setup Analysis")
         print("=" * 60)
         
-        # Test basic imports that should work
-        print("\n1. Testing current imports...")
+        # Test basic imports
+        print("\n1. Testing imports...")
         try:
             from envisionhgdetector import GestureModel, make_model
-            print("   ✓ GestureModel and make_model imported successfully")
+            print("   [OK] GestureModel and make_model imported")
         except ImportError as e:
-            print(f"   ✗ Original model imports failed: {e}")
+            print(f"   [FAIL] Original model imports failed: {e}")
         
         # Test config
-        print("\n2. Testing current Config...")
+        print("\n2. Testing Config...")
         config = Config()
-        print(f"   ✓ Config initialized: {config}")
-        
-        # Show current config attributes
-        print(f"   - Gesture labels: {config.gesture_labels}")
+        print(f"   [OK] Config initialized")
+        print(f"   - Feature set: {config.feature_set}")
+        print(f"   - Num features: {config.num_original_features}")
         print(f"   - Sequence length: {config.seq_length}")
-        if hasattr(config, 'weights_path'):
-            print(f"   - Weights path: {config.weights_path}")
-            if config.weights_path and os.path.exists(config.weights_path):
-                print("   ✓ CNN model file exists")
-            else:
-                print("   ✗ CNN model file not found")
+        print(f"   - CNN model: {config.cnn_model_filename}")
+        print(f"   - LightGBM model: {config.lightgbm_model_filename}")
         
-        # Test detector
-        print("\n3. Testing current GestureDetector...")
-        try:
-            detector = GestureDetector()
-            print("   ✓ GestureDetector initialized successfully")
-            print(f"   - Model type: {getattr(detector, 'model_type', 'cnn (default)')}")
-        except Exception as e:
-            print(f"   ✗ GestureDetector failed: {e}")
+        # Check model availability
+        print("\n3. Checking model availability...")
+        cnn_available = config.is_model_available("cnn")
+        lgbm_available = config.is_model_available("lightgbm")
+        print(f"   CNN available: {cnn_available}")
+        print(f"   LightGBM available: {lgbm_available}")
+        print(f"   Available models: {config.available_models}")
         
-        # Check for new features
-        print("\n4. Checking for new features...")
+        if cnn_available:
+            print(f"   CNN path: {config.weights_path}")
+        if lgbm_available:
+            print(f"   LightGBM path: {config.lightgbm_weights_path}")
         
-        # Check if LightGBM support exists
-        try:
-            detector_with_type = GestureDetector(model_type="lightgbm")
-            print("   ✓ LightGBM support already available")
-        except Exception as e:
-            print(f"   ✗ LightGBM support not available: {e}")
+        # Test default thresholds
+        print("\n4. Default thresholds...")
+        thresholds = config.default_thresholds
+        for name, value in thresholds.items():
+            print(f"   {name}: {value}")
         
-        # Check if RealtimeGestureDetector exists
+        # Test detector with different model types
+        print("\n5. Testing GestureDetector initialization...")
+        
+        # Test CNN
+        if cnn_available:
+            try:
+                detector_cnn = GestureDetector(model_type="cnn")
+                print("   [OK] GestureDetector with model_type='cnn'")
+            except Exception as e:
+                print(f"   [FAIL] CNN detector failed: {e}")
+        else:
+            print("   [SKIP] CNN model not available")
+        
+        # Test LightGBM
+        if lgbm_available:
+            try:
+                detector_lgbm = GestureDetector(model_type="lightgbm")
+                print("   [OK] GestureDetector with model_type='lightgbm'")
+            except Exception as e:
+                print(f"   [FAIL] LightGBM detector failed: {e}")
+        else:
+            print("   [SKIP] LightGBM model not available")
+        
+        # Test Combined
+        if cnn_available and lgbm_available:
+            try:
+                detector_combined = GestureDetector(model_type="combined")
+                print("   [OK] GestureDetector with model_type='combined'")
+            except Exception as e:
+                print(f"   [FAIL] Combined detector failed: {e}")
+        else:
+            print("   [SKIP] Combined model requires both CNN and LightGBM")
+        
+        # Check for RealtimeGestureDetector
+        print("\n6. Testing RealtimeGestureDetector...")
         try:
             from envisionhgdetector import RealtimeGestureDetector
-            print("   ✓ RealtimeGestureDetector already available")
+            detector_realtime = RealtimeGestureDetector(confidence_threshold=0.5)
+            print("   [OK] RealtimeGestureDetector available")
+            print(f"   - Confidence threshold: {detector_realtime.confidence_threshold}")
+            print(f"   - Gesture labels: {detector_realtime.model.gesture_labels}")
         except ImportError:
-            print("   ✗ RealtimeGestureDetector not available - needs update")
+            print("   [FAIL] RealtimeGestureDetector not available")
+        except Exception as e:
+            print(f"   [FAIL] RealtimeGestureDetector error: {e}")
         
-        # Check package location
+        # Check package location and files
         import envisionhgdetector
         package_path = os.path.dirname(envisionhgdetector.__file__)
-        print(f"\n5. Package location: {package_path}")
+        print(f"\n7. Package location: {package_path}")
         
-        # List files in package
-        print("\n6. Current package files:")
+        # List Python files in package
+        print("\n8. Package files:")
         try:
             files = os.listdir(package_path)
-            for file in sorted(files):
-                if file.endswith(('.py', '.h5', '.pkl')):
-                    print(f"   - {file}")
+            py_files = sorted([f for f in files if f.endswith('.py')])
+            for file in py_files:
+                print(f"   - {file}")
         except Exception as e:
             print(f"   Error listing files: {e}")
         
-        # Check for model files
-        print("\n7. Looking for model files...")
+        # Check model directory
+        print("\n9. Model directory:")
         model_dir = os.path.join(package_path, 'model')
         if os.path.exists(model_dir):
-            print(f"   Model directory found: {model_dir}")
             try:
                 model_files = os.listdir(model_dir)
                 for file in sorted(model_files):
-                    print(f"   - {file}")
+                    filepath = os.path.join(model_dir, file)
+                    size_mb = os.path.getsize(filepath) / (1024 * 1024)
+                    print(f"   - {file} ({size_mb:.1f} MB)")
             except Exception as e:
                 print(f"   Error listing model files: {e}")
         else:
-            print("   ✗ Model directory not found")
+            print("   [FAIL] Model directory not found")
+        
+        # Check for new module files
+        print("\n10. Checking for required modules...")
+        required_modules = [
+            'config.py',
+            'detector.py', 
+            'model_cnn.py',
+            'model_lightgbm.py',
+            'model_combined.py',
+            'label_video.py',
+            'label_video_combined.py',
+        ]
+        for module in required_modules:
+            module_path = os.path.join(package_path, module)
+            if os.path.exists(module_path):
+                print(f"   [OK] {module}")
+            else:
+                print(f"   [MISSING] {module}")
         
         print("\n" + "=" * 60)
         print("Analysis complete!")
@@ -101,95 +155,109 @@ def test_current_setup():
         return True
         
     except ImportError as e:
-        print(f"✗ Import error: {e}")
+        print(f"[FAIL] Import error: {e}")
         return False
     except Exception as e:
-        print(f"✗ Unexpected error: {e}")
+        print(f"[FAIL] Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
-def show_update_instructions():
-    """Show instructions for updating the package."""
+
+def test_label_encoder_order():
+    """Test that LightGBM label order is correctly handled."""
     print("\n" + "=" * 60)
-    print("UPDATE INSTRUCTIONS")
+    print("LightGBM Label Encoder Order Test")
     print("=" * 60)
     
-    print("\nTo add LightGBM and real-time detection support:")
-    print("\n1. Update your package files with the new versions I provided:")
-    print("   - config.py (enhanced with LightGBM support)")
-    print("   - __init__.py (updated imports)")
-    print("   - Add model_lightgbm.py to your package")
-    print("   - Update detector.py with LightGBM integration")
-    
-    print("\n2. Add your LightGBM model file:")
-    print("   - Place lightgbm_gesture_model_v1.pkl in the model/ directory")
-    
-    print("\n3. Reinstall the package:")
-    print("   pip uninstall envisionhgdetector")
-    print("   pip install . (from your package source directory)")
-    
-    print("\n4. Or if developing locally:")
-    print("   pip install -e . (editable install)")
-    
-    import envisionhgdetector
-    package_path = os.path.dirname(envisionhgdetector.__file__)
-    print(f"\nYour package files are located at:")
-    print(f"{package_path}")
+    try:
+        from sklearn.preprocessing import LabelEncoder
+        
+        # Simulate what happens during training
+        le = LabelEncoder()
+        le.fit(["NoGesture", "Gesture"])
+        
+        print("\nLabelEncoder behavior:")
+        print(f"  Input labels: ['NoGesture', 'Gesture']")
+        print(f"  Sorted classes: {list(le.classes_)}")
+        print(f"  Index 0 = {le.classes_[0]}")
+        print(f"  Index 1 = {le.classes_[1]}")
+        
+        print("\nIMPORTANT: sklearn LabelEncoder sorts alphabetically!")
+        print("  - Model output index 0 = Gesture (not NoGesture)")
+        print("  - Model output index 1 = NoGesture (not Gesture)")
+        print("\nMake sure inference code handles this correctly.")
+        
+        return True
+    except Exception as e:
+        print(f"[FAIL] Label encoder test failed: {e}")
+        return False
 
-def create_development_test():
-    """Create a test that can work with development files."""
+
+def show_usage_examples():
+    """Show usage examples for different detector types."""
     print("\n" + "=" * 60)
-    print("DEVELOPMENT TEST OPTION")
+    print("Usage Examples")
     print("=" * 60)
     
-    print("\nIf you want to test without reinstalling:")
-    print("1. Copy the updated files to your development directory")
-    print("2. Run Python from that directory")
-    print("3. The import will use local files instead of installed package")
-    
-    test_code = '''
-# test_local_development.py
-import sys
-import os
+    print("""
+# CNN-only detector (3-class: NoGesture, Gesture, Move)
+from envisionhgdetector import GestureDetector
 
-# Add current directory to path to use local files
-sys.path.insert(0, '.')
+detector = GestureDetector(
+    model_type="cnn",
+    motion_threshold=0.7,
+    gesture_threshold=0.5,
+    min_gap_s=0.2,
+    min_length_s=0.3
+)
+detector.process_folder(input_folder, output_folder)
 
-try:
-    from config import Config
-    from detector import GestureDetector, RealtimeGestureDetector
-    
-    print("✓ Local imports successful!")
-    
-    # Test new config features
-    config = Config()
-    print(f"Config: {config}")
-    
-    # Test model availability
-    if hasattr(config, 'validate_model_availability'):
-        cnn_available = config.validate_model_availability('cnn')
-        lightgbm_available = config.validate_model_availability('lightgbm')
-        print(f"CNN available: {cnn_available}")
-        print(f"LightGBM available: {lightgbm_available}")
-    
-except ImportError as e:
-    print(f"Import error: {e}")
-'''
-    
-    print("\nSample local development test code:")
-    print(test_code)
+# LightGBM-only detector (2-class: NoGesture, Gesture)
+detector = GestureDetector(
+    model_type="lightgbm",
+    gesture_threshold=0.6,  # LightGBM may need higher threshold
+    min_gap_s=0.2,
+    min_length_s=0.3
+)
+detector.process_folder(input_folder, output_folder)
+
+# Combined detector (both models, dual-panel video output)
+detector = GestureDetector(
+    model_type="combined",
+    cnn_motion_threshold=0.7,
+    cnn_gesture_threshold=0.5,
+    lgbm_threshold=0.6,  # Higher threshold for LightGBM
+    min_gap_s=0.2,
+    min_length_s=0.3
+)
+detector.process_folder(input_folder, output_folder)
+
+# Real-time webcam detection (LightGBM-based)
+from envisionhgdetector import RealtimeGestureDetector
+
+detector = RealtimeGestureDetector(
+    confidence_threshold=0.6,
+    min_gap_s=0.2,
+    min_length_s=0.3
+)
+raw_results, segments = detector.process_webcam()
+""")
+
 
 def main():
-    """Run the current setup analysis."""
-    print("Analyzing your current EnvisionHGDetector setup...\n")
+    """Run the setup analysis."""
+    print("Analyzing EnvisionHGDetector setup...\n")
     
     success = test_current_setup()
-    show_update_instructions()
-    create_development_test()
+    test_label_encoder_order()
+    show_usage_examples()
     
     if success:
-        print("\n🔍 Analysis completed! See instructions above for updating.")
+        print("\n[OK] Analysis completed successfully!")
     else:
-        print("\n❌ Analysis failed. Please check your installation.")
+        print("\n[FAIL] Analysis failed. Please check your installation.")
+
 
 if __name__ == "__main__":
     main()

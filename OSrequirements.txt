@@ -15,10 +15,13 @@ plotly
 nbformat>=4.2.0
 shapedtw
 umap-learn
+numba
 networkx
 matplotlib
 scikit-image
 plotly==5.5.0
 dash-bootstrap-components
-dash==2.7.0
+dash>=2.11.0
+flask>=2.2.5
 numpy==1.26.4
+ipykernel

@@ -1,82 +1,105 @@
 # envisionhgdetector/model_lightgbm.py
+"""
+LightGBM-based gesture detection model.
+Updated for Config 13 (World landmarks, 100 features, 2-class).
+
+Classes: NoGesture, Gesture (Move merged into NoGesture)
+Features: 100 engineered features from 92 world landmarks
+Window: 5 frames
+"""
 
 import cv2
 import mediapipe as mp
 import numpy as np
 import joblib
-import time
+import os
 from typing import Optional, List, Dict, Any, Tuple
 from collections import deque
 from .config import Config
-import os
 
-# Key joints for LightGBM (shoulders, elbows, wrists)
-KEY_JOINT_INDICES = [11, 12, 13, 14, 15, 16]
-KEY_JOINT_NAMES = ['LEFT_SHOULDER', 'RIGHT_SHOULDER', 'LEFT_ELBOW', 'RIGHT_ELBOW', 'LEFT_WRIST', 'RIGHT_WRIST']
+# Upper body landmark indices (23 landmarks, matching training)
+UPPER_BODY_INDICES = list(range(23))
 
-# Finger landmark indices
-FINGER_INDICES = [17, 18, 19, 20, 21, 22]
+# Key joint indices for feature extraction
+KEY_JOINT_INDICES = [11, 12, 13, 14, 15, 16]  # Shoulders, elbows, wrists
 LEFT_WRIST_IDX = 15
 RIGHT_WRIST_IDX = 16
+
+# Visibility landmark indices
+VISIBILITY_LANDMARKS = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
 
 class LightGBMGestureModel:
     """
     LightGBM-based gesture detection model.
-    Optimized for real-time processing with MediaPipe pose landmarks.
+    Matches Config 13 training: 100 features from world landmarks.
+    
+    2-class model: NoGesture vs Gesture (Move merged into NoGesture)
     """
     
     def __init__(self, config: Optional[Config] = None):
         """Initialize LightGBM model with configuration."""
         self.config = config or Config()
         
+        # Default parameters (will be overwritten by model file)
+        self.window_size = 5
+        self.n_features = 100
+        self.gesture_labels = ("NoGesture", "Gesture")
+        
         # Find and load model
         model_path = self._find_model_path()
-        self.load_model(model_path)
+        if model_path:
+            self.load_model(model_path)
+        else:
+            print("Warning: LightGBM model not found. Call load_model() manually.")
+            self.model = None
+            self.scaler = None
+            self.label_encoder = None
         
-        # Initialize MediaPipe for ultra-fast processing
-        self.mp_pose = mp.solutions.pose
-        self.pose = self.mp_pose.Pose(
+        # Initialize MediaPipe Holistic for world landmarks
+        self.mp_holistic = mp.solutions.holistic
+        self.holistic = self.mp_holistic.Holistic(
             static_image_mode=False,
-            model_complexity=0,  # Fastest model
+            model_complexity=1,
             enable_segmentation=False,
-            smooth_landmarks=False,
-            min_detection_confidence=0.3,
-            min_tracking_confidence=0.3
+            smooth_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
         )
         
-        # Buffers for windowing
-        self.key_joints_buffer = deque(maxlen=self.window_size)
-        self.left_fingers_buffer = deque(maxlen=self.window_size)
-        self.right_fingers_buffer = deque(maxlen=self.window_size)
+        # Buffer for world landmarks (window_size frames)
+        self.landmarks_buffer = deque(maxlen=self.window_size)
         
-        # Motion detection
-        self.motion_threshold = 0.02
+        # Backward compatibility aliases
+        self.key_joints_buffer = self.landmarks_buffer  # Alias for old code
+        self.left_fingers_buffer = deque(maxlen=self.window_size)  # Dummy for old code
+        self.right_fingers_buffer = deque(maxlen=self.window_size)  # Dummy for old code
+        self.includes_fingers = True  # Always true for Config 13
+        self.expected_features = self.n_features  # Alias
         
-        # Confidence threshold (can be set externally)
-        self.confidence_threshold = 0.2
+        # Confidence threshold
+        self.confidence_threshold = 0.5
     
-    def _find_model_path(self) -> str:
+    def _find_model_path(self) -> Optional[str]:
         """Find the LightGBM model file."""
         # Try config path first
-        if hasattr(self.config, 'weights_path') and self.config.weights_path:
-            if self.config.weights_path.endswith('.pkl') and os.path.exists(self.config.weights_path):
-                return self.config.weights_path
+        if hasattr(self.config, 'lightgbm_weights_path') and self.config.lightgbm_weights_path:
+            if os.path.exists(self.config.lightgbm_weights_path):
+                return self.config.lightgbm_weights_path
         
         # Try default paths
         possible_paths = [
+            os.path.join(os.path.dirname(__file__), 'model', 'best_lightgbm_model.pkl'),
+            os.path.join(os.path.dirname(__file__), 'model', 'lightgbm_gesture_model_v2.pkl'),
             os.path.join(os.path.dirname(__file__), 'model', 'lightgbm_gesture_model_v1.pkl'),
-            os.path.join(os.path.dirname(__file__), 'lightgbm_gesture_model_v1.pkl'),
-            'lightgbm_gesture_model_v1.pkl'
+            os.path.join(os.path.dirname(__file__), 'best_lightgbm_model.pkl'),
         ]
         
         for path in possible_paths:
             if os.path.exists(path):
                 return path
         
-        raise FileNotFoundError(
-            f"LightGBM model not found. Tried paths: {possible_paths}. "
-            f"Please ensure lightgbm_gesture_model_v1.pkl is in the model folder."
-        )
+        return None
     
     def load_model(self, model_path: str):
         """Load LightGBM model from joblib file."""
@@ -88,38 +111,269 @@ class LightGBMGestureModel:
             self.model = model_data['model']
             self.scaler = model_data['scaler']
             self.label_encoder = model_data['label_encoder']
-            self.window_size = model_data['window_size']
-            self.gesture_labels = model_data['gesture_labels']
-            self.includes_fingers = model_data.get('includes_fingers', False)
-            self.expected_features = model_data.get('feature_count', 80 if self.includes_fingers else 50)
+            self.window_size = model_data.get('window_size', 5)
+            self.n_features = model_data.get('n_features', 100)
             
-            print(f"LightGBM model loaded successfully!")
-            print(f"Window size: {self.window_size} frames")
-            print(f"Available gestures: {self.gesture_labels}")
-            print(f"Advanced features: {'ENABLED' if self.includes_fingers else 'DISABLED'}")
-            print(f"Expected features: {self.expected_features}")
+            # IMPORTANT: Use label_encoder.classes_ for correct label order
+            # LabelEncoder sorts alphabetically, so classes_ = ['Gesture', 'NoGesture']
+            # This means: index 0 = Gesture, index 1 = NoGesture
+            if self.label_encoder is not None:
+                self.gesture_labels = tuple(self.label_encoder.classes_)
+            else:
+                # Fallback: alphabetical order (sklearn default)
+                self.gesture_labels = ("Gesture", "NoGesture")
+            
+            # Update buffer size
+            self.landmarks_buffer = deque(maxlen=self.window_size)
+            
+            print(f"✓ LightGBM model loaded successfully!")
+            print(f"  Window size: {self.window_size} frames")
+            print(f"  Features: {self.n_features}")
+            print(f"  Classes (model order): {self.gesture_labels}")
             
         except Exception as e:
             raise RuntimeError(f"Failed to load LightGBM model from {model_path}: {str(e)}")
+    
+    def extract_world_landmarks(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Extract world landmarks from frame using MediaPipe Holistic.
+        
+        Returns:
+            Array of 92 features (23 landmarks × 4: x, y, z, visibility)
+            or None if pose not detected
+        """
+        # Convert BGR to RGB
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb_frame.flags.writeable = False
+        
+        # Process with MediaPipe
+        results = self.holistic.process(rgb_frame)
+        
+        if not results.pose_world_landmarks:
+            return None
+        
+        # Extract upper body world landmarks (23 × 4 = 92 features)
+        features = []
+        for idx in UPPER_BODY_INDICES:
+            if idx < len(results.pose_world_landmarks.landmark):
+                lm = results.pose_world_landmarks.landmark[idx]
+                features.extend([lm.x, lm.y, lm.z, lm.visibility])
+            else:
+                features.extend([0.0, 0.0, 0.0, 0.0])
+        
+        return np.array(features, dtype=np.float32)
+    
+    def extract_sequence_features(self, sequence: np.ndarray) -> np.ndarray:
+        """
+        Extract 100 features from a sequence of world landmarks.
+        MATCHES TRAINING EXACTLY!
+        
+        Args:
+            sequence: Array of shape (window_size, 92) - world landmarks
+        
+        Returns:
+            100-dimensional feature vector
+        """
+        if len(sequence) == 0:
+            return np.zeros(100, dtype=np.float32)
+        
+        n_frames = len(sequence)
+        n_landmarks = 23
+        
+        # Reshape to (frames, landmarks, 4) where 4 = x, y, z, visibility
+        try:
+            seq_4d = sequence.reshape(n_frames, n_landmarks, 4)
+        except ValueError:
+            return np.zeros(100, dtype=np.float32)
+        
+        # Separate xyz and visibility
+        seq_3d = seq_4d[:, :, :3]  # (frames, 23, 3)
+        visibility = seq_4d[:, :, 3]  # (frames, 23)
+        
+        features = []
+        
+        # Key joints (shoulders, elbows, wrists)
+        key_joints = seq_3d[:, KEY_JOINT_INDICES, :]  # (frames, 6, 3)
+        key_joints_flat = key_joints.reshape(n_frames, -1)  # (frames, 18)
+        
+        # ===== FEATURES 1-18: Current pose =====
+        current_pose = key_joints_flat[-1]
+        features.extend(current_pose)
+        
+        # ===== FEATURES 19-38: Velocity =====
+        if n_frames > 1:
+            velocity = key_joints_flat[-1] - key_joints_flat[-2]
+            features.extend(velocity)
+            
+            # Wrist speeds (2 values)
+            left_wrist_speed = np.linalg.norm(velocity[12:15])
+            right_wrist_speed = np.linalg.norm(velocity[15:18])
+            features.extend([left_wrist_speed, right_wrist_speed])
+        else:
+            features.extend([0.0] * 20)
+        
+        # ===== FEATURES 39-44: Wrist ranges =====
+        if n_frames >= 3:
+            wrist_data = key_joints_flat[:, 12:18]
+            wrist_ranges = np.ptp(wrist_data, axis=0)
+            features.extend(wrist_ranges)
+        else:
+            features.extend([0.0] * 6)
+        
+        # ===== FEATURES 45-62: Finger features (18 values) =====
+        left_wrist = seq_3d[-1, LEFT_WRIST_IDX, :]
+        right_wrist = seq_3d[-1, RIGHT_WRIST_IDX, :]
+        
+        left_fingers = np.zeros(9, dtype=np.float32)
+        right_fingers = np.zeros(9, dtype=np.float32)
+        
+        if np.any(left_wrist):
+            left_fingers[0:3] = seq_3d[-1, 17, :] - left_wrist  # pinky
+            left_fingers[3:6] = seq_3d[-1, 19, :] - left_wrist  # index
+            left_fingers[6:9] = seq_3d[-1, 21, :] - left_wrist  # thumb
+        
+        if np.any(right_wrist):
+            right_fingers[0:3] = seq_3d[-1, 18, :] - right_wrist  # pinky
+            right_fingers[3:6] = seq_3d[-1, 20, :] - right_wrist  # index
+            right_fingers[6:9] = seq_3d[-1, 22, :] - right_wrist  # thumb
+        
+        features.extend(left_fingers)
+        features.extend(right_fingers)
+        
+        # ===== FEATURES 63-68: Finger distances (6 values) =====
+        left_pinky_thumb = np.linalg.norm(left_fingers[0:3] - left_fingers[6:9]) if np.any(left_fingers) else 0.0
+        left_index_thumb = np.linalg.norm(left_fingers[3:6] - left_fingers[6:9]) if np.any(left_fingers) else 0.0
+        left_pinky_index = np.linalg.norm(left_fingers[0:3] - left_fingers[3:6]) if np.any(left_fingers) else 0.0
+        right_pinky_thumb = np.linalg.norm(right_fingers[0:3] - right_fingers[6:9]) if np.any(right_fingers) else 0.0
+        right_index_thumb = np.linalg.norm(right_fingers[3:6] - right_fingers[6:9]) if np.any(right_fingers) else 0.0
+        right_pinky_index = np.linalg.norm(right_fingers[0:3] - right_fingers[3:6]) if np.any(right_fingers) else 0.0
+        
+        features.extend([left_pinky_thumb, left_index_thumb, left_pinky_index,
+                        right_pinky_thumb, right_index_thumb, right_pinky_index])
+        
+        # ===== FEATURES 69-70: Wrist acceleration =====
+        if n_frames > 2:
+            vel_prev = key_joints_flat[-2] - key_joints_flat[-3]
+            vel_curr = key_joints_flat[-1] - key_joints_flat[-2]
+            accel = vel_curr - vel_prev
+            left_wrist_accel = np.linalg.norm(accel[12:15])
+            right_wrist_accel = np.linalg.norm(accel[15:18])
+            features.extend([left_wrist_accel, right_wrist_accel])
+        else:
+            features.extend([0.0, 0.0])
+        
+        # ===== FEATURES 71-72: Trajectory smoothness =====
+        if n_frames > 2:
+            velocities = np.diff(key_joints_flat, axis=0)
+            left_wrist_vels = velocities[:, 12:15]
+            right_wrist_vels = velocities[:, 15:18]
+            left_smoothness = np.std(np.linalg.norm(left_wrist_vels, axis=1))
+            right_smoothness = np.std(np.linalg.norm(right_wrist_vels, axis=1))
+            features.extend([left_smoothness, right_smoothness])
+        else:
+            features.extend([0.0, 0.0])
+        
+        # ===== FEATURES 73-74: Wrist height relative to shoulders =====
+        left_shoulder = seq_3d[-1, 11, :]
+        right_shoulder = seq_3d[-1, 12, :]
+        left_wrist_pos = seq_3d[-1, LEFT_WRIST_IDX, :]
+        right_wrist_pos = seq_3d[-1, RIGHT_WRIST_IDX, :]
+        
+        left_wrist_height = left_wrist_pos[1] - left_shoulder[1] if np.any(left_shoulder) else 0.0
+        right_wrist_height = right_wrist_pos[1] - right_shoulder[1] if np.any(right_shoulder) else 0.0
+        features.extend([left_wrist_height, right_wrist_height])
+        
+        # ===== FEATURE 75: Wrist spread =====
+        wrist_spread = np.linalg.norm(left_wrist_pos - right_wrist_pos) if np.any(left_wrist_pos) and np.any(right_wrist_pos) else 0.0
+        features.append(wrist_spread)
+        
+        # ===== FEATURES 76-77: Arm extension =====
+        left_arm_extension = np.linalg.norm(left_wrist_pos - left_shoulder) if np.any(left_shoulder) else 0.0
+        right_arm_extension = np.linalg.norm(right_wrist_pos - right_shoulder) if np.any(right_shoulder) else 0.0
+        features.extend([left_arm_extension, right_arm_extension])
+        
+        # ===== FEATURE 78: Total motion =====
+        if n_frames > 1:
+            total_motion = np.sum(np.linalg.norm(np.diff(seq_3d[:, LEFT_WRIST_IDX, :], axis=0), axis=1))
+            total_motion += np.sum(np.linalg.norm(np.diff(seq_3d[:, RIGHT_WRIST_IDX, :], axis=0), axis=1))
+            features.append(total_motion)
+        else:
+            features.append(0.0)
+        
+        # ===== FEATURE 79: Position symmetry =====
+        if np.any(left_wrist_pos) and np.any(right_wrist_pos):
+            body_center = (left_shoulder + right_shoulder) / 2
+            left_rel = left_wrist_pos - body_center
+            right_rel = right_wrist_pos - body_center
+            symmetry = 1.0 / (1.0 + np.linalg.norm(left_rel + right_rel * np.array([-1, 1, 1])))
+            features.append(symmetry)
+        else:
+            features.append(0.0)
+        
+        # ===== FEATURE 80: Motion asymmetry =====
+        if n_frames > 1:
+            left_motion = np.sum(np.linalg.norm(np.diff(seq_3d[:, LEFT_WRIST_IDX, :], axis=0), axis=1))
+            right_motion = np.sum(np.linalg.norm(np.diff(seq_3d[:, RIGHT_WRIST_IDX, :], axis=0), axis=1))
+            motion_asymmetry = abs(left_motion - right_motion) / (left_motion + right_motion + 1e-6)
+            features.append(motion_asymmetry)
+        else:
+            features.append(0.0)
+        
+        # ===== FEATURES 81-92: Current visibility (12 values) =====
+        current_vis = visibility[-1, VISIBILITY_LANDMARKS]
+        features.extend(current_vis)
+        
+        # ===== FEATURES 93-98: Mean visibility (6 values) =====
+        mean_vis = np.mean(visibility[:, [11, 12, 13, 14, 15, 16]], axis=0)
+        features.extend(mean_vis)
+        
+        # ===== FEATURES 99-100: Min wrist visibility (2 values) =====
+        min_vis_left_wrist = np.min(visibility[:, 15])
+        min_vis_right_wrist = np.min(visibility[:, 16])
+        features.extend([min_vis_left_wrist, min_vis_right_wrist])
+        
+        assert len(features) == 100, f"Expected 100 features, got {len(features)}"
+        
+        return np.array(features, dtype=np.float32)
     
     def predict(self, features: np.ndarray) -> np.ndarray:
         """
         Run inference on input features.
         
         Args:
-            features: Input features of shape (batch_size, feature_dim) or (feature_dim,)
+            features: Input features of shape (batch_size, 100) or (100,)
             
         Returns:
-            Model predictions with shape (batch_size, num_classes)
+            Probabilities with shape (batch_size, num_classes)
         """
+        if self.model is None:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+        
         if features.ndim == 1:
             features = features.reshape(1, -1)
         
         # Scale features
         features_scaled = self.scaler.transform(features)
         
-        # Get predictions (LightGBM returns probabilities)
-        probabilities = self.model.predict(features_scaled)
+        # Get predictions - handle both Booster and Classifier objects
+        if hasattr(self.model, 'predict_proba'):
+            # LGBMClassifier - returns probabilities directly
+            probabilities = self.model.predict_proba(features_scaled)
+        else:
+            # Raw Booster trained with multiclass objective
+            # predict() already returns probabilities with shape (n_samples, n_classes)
+            raw_output = self.model.predict(features_scaled)
+            probabilities = np.array(raw_output)
+            
+            # Ensure 2D output
+            if probabilities.ndim == 1:
+                # Single sample, check if it's already probabilities
+                if len(probabilities) == len(self.gesture_labels):
+                    probabilities = probabilities.reshape(1, -1)
+                else:
+                    # Binary single value - apply sigmoid
+                    gesture_probs = 1.0 / (1.0 + np.exp(-probabilities))
+                    probabilities = np.column_stack([1 - gesture_probs, gesture_probs])
         
         if probabilities.ndim == 1:
             probabilities = probabilities.reshape(1, -1)
@@ -128,231 +382,83 @@ class LightGBMGestureModel:
     
     def extract_features_from_frame(self, frame: np.ndarray) -> Optional[np.ndarray]:
         """
-        Extract features from a single frame and return them for prediction.
-        This is the main interface for real-time processing.
+        Extract features from a single frame for real-time prediction.
         
         Args:
-            frame: Input video frame
+            frame: Input video frame (BGR)
             
         Returns:
-            Features array ready for prediction, or None if not enough data
+            100-dimensional feature array, or None if not enough data
         """
-        # Extract landmarks
-        key_joints, left_fingers, right_fingers = self._extract_landmarks_fast(frame)
+        # Extract world landmarks
+        landmarks = self.extract_world_landmarks(frame)
         
-        if key_joints is None:
+        if landmarks is None:
             return None
         
-        # Add to buffers
-        self.key_joints_buffer.append(key_joints)
-        if self.includes_fingers:
-            self.left_fingers_buffer.append(left_fingers if left_fingers is not None else np.zeros(9))
-            self.right_fingers_buffer.append(right_fingers if right_fingers is not None else np.zeros(9))
+        # Add to buffer
+        self.landmarks_buffer.append(landmarks)
         
-        # Check if we have enough frames for a window
-        if len(self.key_joints_buffer) < self.window_size:
+        # Check if we have enough frames
+        if len(self.landmarks_buffer) < self.window_size:
             return None
         
-        # Extract enhanced features from current window
-        key_sequence = np.array(list(self.key_joints_buffer))
-        left_fingers_sequence = np.array(list(self.left_fingers_buffer)) if self.includes_fingers else np.array([])
-        right_fingers_sequence = np.array(list(self.right_fingers_buffer)) if self.includes_fingers else np.array([])
+        # Extract features from sequence
+        sequence = np.array(list(self.landmarks_buffer))
+        features = self.extract_sequence_features(sequence)
         
-        enhanced_features = self._extract_enhanced_features(
-            key_sequence, left_fingers_sequence, right_fingers_sequence
-        )
-        
-        return enhanced_features
+        return features
     
-    def fast_motion_detection(self) -> bool:
-        """Check if there's motion in recent frames."""
-        if len(self.key_joints_buffer) < 2:
-            return True
+    def predict_frame(self, frame: np.ndarray) -> Tuple[Optional[str], Optional[float]]:
+        """
+        Predict gesture from a single frame.
         
-        current_joints = self.key_joints_buffer[-1]
-        prev_joints = self.key_joints_buffer[-2]
+        Args:
+            frame: Input video frame (BGR)
+            
+        Returns:
+            Tuple of (gesture_label, confidence) or (None, None) if not ready
+        """
+        features = self.extract_features_from_frame(frame)
         
-        # Only check wrist movement (indices 12-17 in key joints)
-        left_wrist_motion = np.linalg.norm(current_joints[12:15] - prev_joints[12:15])
-        right_wrist_motion = np.linalg.norm(current_joints[15:18] - prev_joints[15:18])
+        if features is None:
+            return None, None
         
-        max_motion = max(left_wrist_motion, right_wrist_motion)
-        return max_motion > self.motion_threshold
+        # Get prediction
+        probs = self.predict(features)[0]
+        
+        # Get class and confidence
+        class_idx = np.argmax(probs)
+        confidence = probs[class_idx]
+        
+        # Apply threshold
+        if confidence < self.confidence_threshold:
+            return "NoGesture", 1.0 - probs[1]  # Return NoGesture confidence
+        
+        gesture_label = self.gesture_labels[class_idx]
+        
+        return gesture_label, confidence
+    
+    def reset_buffer(self):
+        """Clear the landmark buffer."""
+        self.landmarks_buffer.clear()
+        # Clear backward compatibility buffers too
+        if hasattr(self, 'left_fingers_buffer'):
+            self.left_fingers_buffer.clear()
+        if hasattr(self, 'right_fingers_buffer'):
+            self.right_fingers_buffer.clear()
     
     def set_confidence_threshold(self, threshold: float):
-        """Update confidence threshold dynamically."""
+        """Update confidence threshold."""
         self.confidence_threshold = max(0.0, min(1.0, threshold))
     
     def standardize_gesture_name(self, gesture: str) -> str:
         """Standardize gesture names to consistent format."""
         if not gesture or gesture.lower() in ['no_gesture', 'nogesture', 'none', '']:
             return "NOGESTURE"
-        
-        # Convert to consistent format and remove underscores/spaces  
-        standardized = gesture.upper().replace('_', '').replace(' ', '')
-        return standardized
+        return gesture.upper().replace('_', '').replace(' ', '')
     
-    def _extract_landmarks_fast(self, image: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
-        """Extract landmarks from frame using MediaPipe pose."""
-        # Convert BGR to RGB
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        rgb_image.flags.writeable = False
-        
-        # Process with MediaPipe pose
-        pose_results = self.pose.process(rgb_image)
-        
-        if not pose_results.pose_world_landmarks:
-            return None, None, None
-        
-        # Extract key joints
-        key_landmarks = []
-        landmarks = pose_results.pose_world_landmarks.landmark
-        
-        for idx in KEY_JOINT_INDICES:
-            if idx < len(landmarks):
-                landmark = landmarks[idx]
-                key_landmarks.extend([landmark.x, landmark.y, landmark.z])
-            else:
-                key_landmarks.extend([0.0, 0.0, 0.0])
-        
-        key_joints = np.array(key_landmarks, dtype=np.float32)
-        
-        # Extract finger landmarks if enabled
-        left_fingers_relative = np.zeros(9, dtype=np.float32)
-        right_fingers_relative = np.zeros(9, dtype=np.float32)
-        
-        if self.includes_fingers:
-            left_fingers_relative, right_fingers_relative = self._extract_fingers_from_pose_landmarks(pose_results)
-        
-        return key_joints, left_fingers_relative, right_fingers_relative
-    
-    def _extract_fingers_from_pose_landmarks(self, pose_results) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract finger landmarks from pose landmarks, centered around wrists."""
-        left_fingers_relative = np.zeros(9, dtype=np.float32)
-        right_fingers_relative = np.zeros(9, dtype=np.float32)
-        
-        if not pose_results or not pose_results.pose_world_landmarks:
-            return left_fingers_relative, right_fingers_relative
-        
-        landmarks = pose_results.pose_world_landmarks.landmark
-        
-        if len(landmarks) < 23:
-            return left_fingers_relative, right_fingers_relative
-        
-        # Get wrist positions
-        left_wrist = None
-        right_wrist = None
-        
-        if len(landmarks) > LEFT_WRIST_IDX:
-            left_wrist_landmark = landmarks[LEFT_WRIST_IDX]
-            left_wrist = np.array([left_wrist_landmark.x, left_wrist_landmark.y, left_wrist_landmark.z], dtype=np.float32)
-            
-        if len(landmarks) > RIGHT_WRIST_IDX:
-            right_wrist_landmark = landmarks[RIGHT_WRIST_IDX]
-            right_wrist = np.array([right_wrist_landmark.x, right_wrist_landmark.y, right_wrist_landmark.z], dtype=np.float32)
-        
-        # Extract left fingers relative to left wrist (indices 17, 19, 21)
-        if left_wrist is not None and len(landmarks) > 21:
-            finger_indices = [17, 19, 21]  # left_pinky, left_index, left_thumb
-            for i, finger_idx in enumerate(finger_indices):
-                if len(landmarks) > finger_idx:
-                    finger_landmark = landmarks[finger_idx]
-                    finger_pos = np.array([finger_landmark.x, finger_landmark.y, finger_landmark.z], dtype=np.float32)
-                    left_fingers_relative[i*3:(i+1)*3] = finger_pos - left_wrist
-        
-        # Extract right fingers relative to right wrist (indices 18, 20, 22)
-        if right_wrist is not None and len(landmarks) > 22:
-            finger_indices = [18, 20, 22]  # right_pinky, right_index, right_thumb
-            for i, finger_idx in enumerate(finger_indices):
-                if len(landmarks) > finger_idx:
-                    finger_landmark = landmarks[finger_idx]
-                    finger_pos = np.array([finger_landmark.x, finger_landmark.y, finger_landmark.z], dtype=np.float32)
-                    right_fingers_relative[i*3:(i+1)*3] = finger_pos - right_wrist
-        
-        return left_fingers_relative, right_fingers_relative
-    
-    def _extract_enhanced_features(self, key_joints_sequence: np.ndarray, 
-                                  left_fingers_sequence: np.ndarray, 
-                                  right_fingers_sequence: np.ndarray) -> np.ndarray:
-        """Extract enhanced features matching the training feature extraction."""
-        if len(key_joints_sequence) == 0:
-            return np.zeros(self.expected_features, dtype=np.float32)
-        
-        features = []
-        
-        # Current pose (18 values: 6 joints * 3 coords)
-        current_pose = key_joints_sequence[-1]
-        features.extend(current_pose)
-        
-        if len(key_joints_sequence) > 1:
-            # Simple velocity (18 values)
-            velocity = key_joints_sequence[-1] - key_joints_sequence[-2]
-            features.extend(velocity)
-            
-            # Wrist speeds only (2 values)
-            left_wrist_speed = np.linalg.norm(velocity[12:15])
-            right_wrist_speed = np.linalg.norm(velocity[15:18])
-            features.extend([left_wrist_speed, right_wrist_speed])
-        else:
-            features.extend([0.0] * 20)
-        
-        # Simple range over window for pose
-        if len(key_joints_sequence) >= 3:
-            # Range for wrists only (6 values)
-            wrist_data = key_joints_sequence[:, 12:18]
-            wrist_ranges = np.ptp(wrist_data, axis=0)
-            features.extend(wrist_ranges)
-        else:
-            features.extend([0.0] * 6)
-        
-        # Advanced features (if enabled)
-        if self.includes_fingers and self.expected_features >= 80:
-            # Current finger positions (18 values: 2 hands * 9 coords each)
-            current_left_fingers = left_fingers_sequence[-1] if len(left_fingers_sequence) > 0 else np.zeros(9)
-            current_right_fingers = right_fingers_sequence[-1] if len(right_fingers_sequence) > 0 else np.zeros(9)
-            features.extend(current_left_fingers)
-            features.extend(current_right_fingers)
-            
-            # Shape features for each hand (6 values total)
-            finger_distances = self._calculate_finger_distances(current_left_fingers, current_right_fingers)
-            features.extend(finger_distances)
-        
-        # Pad to expected size
-        while len(features) < self.expected_features:
-            features.append(0.0)
-        
-        return np.array(features[:self.expected_features], dtype=np.float32)
-    
-    def _calculate_finger_distances(self, left_fingers: np.ndarray, right_fingers: np.ndarray) -> List[float]:
-        """Calculate finger distances for shape features."""
-        distances = []
-        
-        # Left hand distances
-        if len(left_fingers) >= 9 and np.any(left_fingers):
-            left_pinky_pos = left_fingers[0:3]
-            left_index_pos = left_fingers[3:6]
-            left_thumb_pos = left_fingers[6:9]
-            
-            distances.extend([
-                np.linalg.norm(left_pinky_pos - left_thumb_pos),
-                np.linalg.norm(left_index_pos - left_thumb_pos),
-                np.linalg.norm(left_pinky_pos - left_index_pos)
-            ])
-        else:
-            distances.extend([0.0, 0.0, 0.0])
-        
-        # Right hand distances
-        if len(right_fingers) >= 9 and np.any(right_fingers):
-            right_pinky_pos = right_fingers[0:3]
-            right_index_pos = right_fingers[3:6]
-            right_thumb_pos = right_fingers[6:9]
-            
-            distances.extend([
-                np.linalg.norm(right_pinky_pos - right_thumb_pos),
-                np.linalg.norm(right_index_pos - right_thumb_pos),
-                np.linalg.norm(right_pinky_pos - right_index_pos)
-            ])
-        else:
-            distances.extend([0.0, 0.0, 0.0])
-        
-        return distances
+    def __del__(self):
+        """Cleanup MediaPipe resources."""
+        if hasattr(self, 'holistic') and self.holistic:
+            self.holistic.close()

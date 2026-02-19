@@ -1,6 +1,6 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: envisionhgdetector
-Version: 2.0.0.9
+Version: 3.0.0
 Summary: Hand gesture detection using MediaPipe and CNN, kinematic analysis, and visualization.
 Home-page: https://github.com/wimpouw/envisionhgdetector
 Author: Wim Pouw, Bosco Yung, Sharjeel Shaikh, James Trujillo, Antonio Rueda-Toicen, Gerard de Melo, Babajide Owoyele
@@ -10,7 +10,7 @@ Classifier: License :: OSI Approved :: MIT License
 Classifier: Operating System :: OS Independent
 Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
 Classifier: Topic :: Scientific/Engineering :: Image Recognition
-Requires-Python: >=3.7
+Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 License-File: LICENSE
 Requires-Dist: moviepy==2.1.1
@@ -24,17 +24,30 @@ Requires-Dist: pytest>=7.0.0
 Requires-Dist: black>=22.0.0
 Requires-Dist: tqdm<5.0.0,>=4.65.0
 Requires-Dist: shapedtw==1.0.3
-Requires-Dist: umap-learn==0.5.3
+Requires-Dist: umap-learn>=0.5.5
+Requires-Dist: numba>=0.56.0
 Requires-Dist: scipy>=1.10.0
-Requires-Dist: dash==2.7.0
+Requires-Dist: dash>=2.11.0
+Requires-Dist: flask>=2.2.5
 Requires-Dist: plotly==5.5.0
 Requires-Dist: dash-bootstrap-components>=1.4.0
-Requires-Dist: werkzeug==2.0.3
+Requires-Dist: werkzeug>=2.2.3
 Requires-Dist: ipython>=8.0.0
 Requires-Dist: lightgbm>=3.3.0
 Requires-Dist: scikit-learn>=1.0.0
 Requires-Dist: matplotlib>=3.5.0
 Requires-Dist: seaborn>=0.11.0
+Requires-Dist: ipykernel
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
 
 # EnvisionHGDetector: Co-speech Hand Gesture Detection Python Package
 A Python package for detecting and classifying hand gestures using MediaPipe Holistic and deep learning.
