@@ -9,7 +9,7 @@ from .model_cnn import GestureModel
 from .model_lightgbm import LightGBMGestureModel
 from .model_combined import CombinedGestureModel, CombinedConfig, load_combined_model
 
-__version__ = "3.0.0"
+__version__ = "3.0.1"
 __author__ = "Wim Pouw, Bosco Yung, Sharjeel Shaikh, James Trujillo, Antonio Rueda-Toicen, Gerard de Melo, Babajide Owoyele"
 
 __all__ = [

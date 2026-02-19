@@ -394,7 +394,7 @@ def run_dashboard_server(data_folder: str, assets_folder: str = "./assets", debu
             video_src
         )
 
-    app.run_server(debug=debug)
+    app.run(debug=debug)
 
 if __name__ == '__main__':
     OUTPUT_DIR = './'
