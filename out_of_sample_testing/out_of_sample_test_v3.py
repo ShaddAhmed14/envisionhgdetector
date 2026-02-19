@@ -7,11 +7,19 @@ This script:
 2. Evaluates CNN and LightGBM separately using their respective outputs
 3. Performs grid search for optimal parameters for each model
 4. Generates comparison metrics and visualizations
-5. Analyzes gesture categories and difficulty
+5. Analyzes gesture categories/subtypes (iconic, deictic, beat, etc.)
 6. Creates segment correlation plots
 
+Metrics computed:
+- GESTURE-CLASS METRICS: Accuracy, Precision, Recall, F1 for the gesture class only
+  (This is what matters for gesture detection - how well do we find gestures?)
+- OVERALL WEIGHTED METRICS: Weighted average across all classes
+  (Includes NoGesture frames, which dominate - can be misleading)
+
+The grid search optimizes for Gesture F1 (gesture-class F1), not overall accuracy.
+
 Usage:
-    python test_combined_out_of_sample.py
+    python out_of_sample_test_v3.py
 """
 
 import os
@@ -723,7 +731,7 @@ def plot_results(analysis: Dict, model_name: str, param_cols: List[str]) -> None
         table_data.append(row_data)
     
     col_labels = [col.replace('_', '\n') for col in param_cols]
-    col_labels.extend(['Accuracy', 'Precision', 'Recall', 'F1', 'FP Rate', 'FN Rate'])
+    col_labels.extend(['Gesture\nAccuracy', 'Gesture\nPrecision', 'Gesture\nRecall', 'Gesture\nF1', 'Gesture\nFP Rate', 'Gesture\nFN Rate'])
     
     plt.table(cellText=table_data,
               colLabels=col_labels,
@@ -758,7 +766,7 @@ def plot_results(analysis: Dict, model_name: str, param_cols: List[str]) -> None
     
     if dataset_table_data:
         plt.table(cellText=dataset_table_data,
-                  colLabels=['Dataset', 'Accuracy', 'Precision', 'Recall', 'F1', 'FP Rate', 'FN Rate'],
+                  colLabels=['Dataset', 'Gesture\nAccuracy', 'Gesture\nPrecision', 'Gesture\nRecall', 'Gesture\nF1', 'Gesture\nFP Rate', 'Gesture\nFN Rate'],
                   loc='center',
                   cellLoc='center')
         plt.savefig(f'dataset_metrics_{model_name.lower()}.png', bbox_inches='tight', dpi=300)
@@ -820,7 +828,7 @@ def plot_results(analysis: Dict, model_name: str, param_cols: List[str]) -> None
     
     if video_table_data:
         plt.table(cellText=video_table_data,
-                  colLabels=['Video', 'Accuracy', 'Precision', 'Recall', 'F1', 'FP Rate', 'FN Rate'],
+                  colLabels=['Video', 'Gesture\nAccuracy', 'Gesture\nPrecision', 'Gesture\nRecall', 'Gesture\nF1', 'Gesture\nFP Rate', 'Gesture\nFN Rate'],
                   loc='center',
                   cellLoc='center')
         plt.savefig(f'video_metrics_{model_name.lower()}.png', bbox_inches='tight', dpi=300)
@@ -917,7 +925,7 @@ def plot_model_comparison(cnn_analysis: Dict, lgbm_analysis: Dict) -> None:
         diff_row.append(f"{diff:+.3f}")
     comparison_data.append(diff_row)
     
-    col_labels = ['Model', 'Best Parameters', 'Accuracy', 'Precision', 'Recall', 'F1', 'FP Rate', 'FN Rate']
+    col_labels = ['Model', 'Best Parameters', 'Gesture\nAccuracy', 'Gesture\nPrecision', 'Gesture\nRecall', 'Gesture\nF1', 'Gesture\nFP Rate', 'Gesture\nFN Rate']
     
     table = plt.table(cellText=comparison_data,
                       colLabels=col_labels,
@@ -928,13 +936,17 @@ def plot_model_comparison(cnn_analysis: Dict, lgbm_analysis: Dict) -> None:
     plt.savefig('model_comparison.png', bbox_inches='tight', dpi=300)
     plt.close()
     
-    # Save comparison CSV
+    # Save comparison CSV with both gesture-class and overall metrics
     comparison_df = pd.DataFrame({
         'Model': ['CNN', 'LightGBM'],
-        'Best_F1': [cnn_best.get('gesture_f1', 0), lgbm_best.get('gesture_f1', 0)],
-        'Best_Precision': [cnn_best.get('gesture_precision', 0), lgbm_best.get('gesture_precision', 0)],
-        'Best_Recall': [cnn_best.get('gesture_recall', 0), lgbm_best.get('gesture_recall', 0)],
-        'Best_Accuracy': [cnn_best.get('gesture_accuracy', 0), lgbm_best.get('gesture_accuracy', 0)],
+        # Gesture-class metrics (what matters for gesture detection)
+        'Gesture_F1': [cnn_best.get('gesture_f1', 0), lgbm_best.get('gesture_f1', 0)],
+        'Gesture_Precision': [cnn_best.get('gesture_precision', 0), lgbm_best.get('gesture_precision', 0)],
+        'Gesture_Recall': [cnn_best.get('gesture_recall', 0), lgbm_best.get('gesture_recall', 0)],
+        'Gesture_Accuracy': [cnn_best.get('gesture_accuracy', 0), lgbm_best.get('gesture_accuracy', 0)],
+        # Overall weighted metrics (includes NoGesture frames)
+        'Overall_F1': [cnn_best.get('f1', 0), lgbm_best.get('f1', 0)],
+        'Overall_Accuracy': [cnn_best.get('accuracy', 0), lgbm_best.get('accuracy', 0)],
     })
     comparison_df.to_csv('model_comparison.csv', index=False)
     
@@ -1105,6 +1117,466 @@ def plot_segment_correlation(pairs: List[Dict], best_params: Dict, model_name: s
 
 
 # ============================================================================
+# STEP 8: GESTURE SUBTYPE/CATEGORY ANALYSIS
+# ============================================================================
+
+# Category mappings for different datasets
+CATEGORY_MAPPINGS = {
+    'SAGA': {
+        'beat': 'gesture_beat',
+        'deictic': 'gesture_deictic',
+        'deictic-beat': 'gesture_deictic-beat',
+        'discourse': 'gesture_discourse',
+        'gtype': 'gesture_other',
+        'iconic': 'gesture_iconic',
+        'iconic-beat': 'gesture_iconic-beat',
+        'iconic-deictic': 'gesture_iconic-deictic',
+    },
+    'Multisimo': {
+        'Beat': 'gesture_beat',
+        'Iconic': 'gesture_iconic', 
+        'Symbolic': 'gesture_symbolic',
+    }
+}
+
+
+def get_cnn_predictions_with_processing(
+    predictions_df: pd.DataFrame,
+    motion_thresh: float,
+    gesture_thresh: float,
+    min_gap_s: float,
+    min_length_s: float,
+    gesture_class_bias: float = 0.0,
+    fps: int = 25
+) -> List[str]:
+    """
+    Get frame-by-frame CNN predictions with temporal post-processing.
+    
+    Returns list of labels: 'gesture', 'move', or 'none'
+    """
+    # Apply gesture_class_bias if specified
+    if gesture_class_bias > 0 and 'Move_confidence' in predictions_df.columns:
+        adjusted_df = predictions_df.copy()
+        motion_mask = adjusted_df['has_motion'] >= motion_thresh
+        
+        if motion_mask.any():
+            gesture_conf = adjusted_df.loc[motion_mask, 'Gesture_confidence'].copy()
+            move_conf = adjusted_df.loc[motion_mask, 'Move_confidence'].copy()
+            
+            adjustment = gesture_class_bias * move_conf * 0.5
+            adjusted_gesture = gesture_conf + adjustment
+            adjusted_move = move_conf - adjustment
+            
+            total_conf = gesture_conf + move_conf
+            valid_mask = (adjusted_gesture + adjusted_move) > 0
+            
+            if valid_mask.any():
+                norm_factor = total_conf[valid_mask] / (adjusted_gesture[valid_mask] + adjusted_move[valid_mask])
+                adjusted_gesture[valid_mask] *= norm_factor
+                adjusted_move[valid_mask] *= norm_factor
+            
+            adjusted_df.loc[motion_mask, 'Gesture_confidence'] = adjusted_gesture
+            adjusted_df.loc[motion_mask, 'Move_confidence'] = adjusted_move
+    else:
+        adjusted_df = predictions_df
+    
+    # Initial frame-by-frame predictions
+    initial_labels = []
+    for _, row in adjusted_df.iterrows():
+        if row.get('has_motion', 0) >= motion_thresh:
+            if row.get('Gesture_confidence', 0) >= gesture_thresh:
+                initial_labels.append('gesture')
+            else:
+                initial_labels.append('move')
+        else:
+            initial_labels.append('none')
+    
+    # Convert to segments
+    segments = []
+    current_label = initial_labels[0]
+    start_frame = 0
+    
+    for frame, label in enumerate(initial_labels[1:], 1):
+        if label != current_label:
+            segments.append({'start': start_frame, 'end': frame - 1, 'label': current_label})
+            start_frame = frame
+            current_label = label
+    segments.append({'start': start_frame, 'end': len(initial_labels) - 1, 'label': current_label})
+    
+    # Filter short segments
+    min_length_frames = int(min_length_s * fps)
+    filtered_segments = [
+        seg for seg in segments
+        if seg['label'] == 'none' or (seg['end'] - seg['start'] + 1) >= min_length_frames
+    ]
+    
+    # Merge segments with small gaps
+    min_gap_frames = int(min_gap_s * fps)
+    merged_segments = []
+    i = 0
+    while i < len(filtered_segments):
+        current = filtered_segments[i].copy()
+        while (i + 1 < len(filtered_segments) and
+               filtered_segments[i + 1]['label'] == current['label'] and
+               filtered_segments[i + 1]['start'] - current['end'] <= min_gap_frames):
+            current['end'] = filtered_segments[i + 1]['end']
+            i += 1
+        merged_segments.append(current)
+        i += 1
+    
+    # Convert back to frame-by-frame
+    final_predictions = ['none'] * len(initial_labels)
+    for segment in merged_segments:
+        if segment['label'] != 'none':
+            for frame in range(segment['start'], segment['end'] + 1):
+                if frame < len(final_predictions):
+                    final_predictions[frame] = segment['label']
+    
+    return final_predictions
+
+
+def get_lgbm_predictions_with_processing(
+    predictions_df: pd.DataFrame,
+    lgbm_thresh: float,
+    min_gap_s: float,
+    min_length_s: float,
+    fps: int = 25
+) -> List[str]:
+    """
+    Get frame-by-frame LightGBM predictions with temporal post-processing.
+    
+    Returns list of labels: 'gesture' or 'none'
+    """
+    # Initial frame-by-frame predictions
+    initial_labels = []
+    for _, row in predictions_df.iterrows():
+        lgbm_prob = row.get('lgbm_gesture_prob', 0)
+        if pd.isna(lgbm_prob):
+            lgbm_prob = 0
+        if lgbm_prob >= lgbm_thresh:
+            initial_labels.append('gesture')
+        else:
+            initial_labels.append('none')
+    
+    # Convert to segments
+    segments = []
+    current_label = initial_labels[0]
+    start_frame = 0
+    
+    for frame, label in enumerate(initial_labels[1:], 1):
+        if label != current_label:
+            segments.append({'start': start_frame, 'end': frame - 1, 'label': current_label})
+            start_frame = frame
+            current_label = label
+    segments.append({'start': start_frame, 'end': len(initial_labels) - 1, 'label': current_label})
+    
+    # Filter short segments
+    min_length_frames = int(min_length_s * fps)
+    filtered_segments = [
+        seg for seg in segments
+        if seg['label'] == 'none' or (seg['end'] - seg['start'] + 1) >= min_length_frames
+    ]
+    
+    # Merge segments with small gaps
+    min_gap_frames = int(min_gap_s * fps)
+    merged_segments = []
+    i = 0
+    while i < len(filtered_segments):
+        current = filtered_segments[i].copy()
+        while (i + 1 < len(filtered_segments) and
+               filtered_segments[i + 1]['label'] == current['label'] and
+               filtered_segments[i + 1]['start'] - current['end'] <= min_gap_frames):
+            current['end'] = filtered_segments[i + 1]['end']
+            i += 1
+        merged_segments.append(current)
+        i += 1
+    
+    # Convert back to frame-by-frame
+    final_predictions = ['none'] * len(initial_labels)
+    for segment in merged_segments:
+        if segment['label'] != 'none':
+            for frame in range(segment['start'], segment['end'] + 1):
+                if frame < len(final_predictions):
+                    final_predictions[frame] = segment['label']
+    
+    return final_predictions
+
+
+def evaluate_gesture_subtypes(
+    best_cnn_params: Dict,
+    best_lgbm_params: Dict,
+    testdata_folder: str = VIDEO_FOLDER,
+    original_gt_folder: str = GROUND_TRUTH_FOLDER
+) -> Dict:
+    """
+    Evaluate performance metrics for specific gesture subtypes (iconic, deictic, beat, etc.)
+    for both CNN and LightGBM models.
+    
+    Returns dictionary with performance metrics by gesture category for each model.
+    """
+    print("\n" + "=" * 70)
+    print("STEP 7: Gesture Subtype Analysis")
+    print("=" * 70)
+    
+    # Video to dataset mapping
+    video_to_dataset = {
+        'V10': 'SAGA',
+        'P006_S02': 'Multisimo',
+        'P007_S02': 'Multisimo'
+    }
+    
+    results = {
+        'CNN': {'by_category': defaultdict(lambda: defaultdict(list))},
+        'LightGBM': {'by_category': defaultdict(lambda: defaultdict(list))}
+    }
+    
+    for video_id, dataset in video_to_dataset.items():
+        print(f"\nProcessing {video_id} ({dataset})...")
+        
+        # Get prediction file
+        pred_file = os.path.join(testdata_folder, f"{video_id}.mp4_predictions.csv")
+        if not os.path.exists(pred_file):
+            print(f"  Warning: Prediction file not found: {pred_file}")
+            continue
+        
+        # Get original ground truth with detailed categories
+        orig_gt_file = os.path.join(original_gt_folder, f"{video_id}.txt")
+        if not os.path.exists(orig_gt_file):
+            print(f"  Warning: Original ground truth not found: {orig_gt_file}")
+            continue
+        
+        # Load predictions
+        predictions_df = pd.read_csv(pred_file)
+        total_frames = len(predictions_df)
+        
+        # Get frame-by-frame predictions for both models
+        cnn_labels = get_cnn_predictions_with_processing(
+            predictions_df,
+            best_cnn_params.get('motion_thresh', 0.5),
+            best_cnn_params.get('gesture_thresh', 0.3),
+            best_cnn_params.get('min_gap_s', 0.2),
+            best_cnn_params.get('min_length_s', 0.3),
+            best_cnn_params.get('gesture_class_bias', 0.0)
+        )
+        
+        lgbm_labels = get_lgbm_predictions_with_processing(
+            predictions_df,
+            best_lgbm_params.get('lgbm_thresh', 0.5),
+            best_lgbm_params.get('min_gap_s', 0.2),
+            best_lgbm_params.get('min_length_s', 0.3)
+        )
+        
+        # Parse original ground truth with detailed categories
+        category_frames = defaultdict(list)
+        
+        with open(orig_gt_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                
+                parts = line.strip().split()
+                
+                if dataset == 'SAGA':
+                    if len(parts) >= 4 and parts[0] == 'Tier-0':
+                        start_time = float(parts[1]) / 1000
+                        end_time = float(parts[2]) / 1000
+                        raw_label = parts[3]
+                    else:
+                        continue
+                elif dataset == 'Multisimo':
+                    if len(parts) >= 4 and parts[0].startswith('Gestures_'):
+                        try:
+                            start_time = float(parts[1]) / 1000
+                            end_time = float(parts[2]) / 1000
+                            raw_label = parts[3]
+                        except ValueError:
+                            continue
+                    else:
+                        continue
+                else:
+                    continue
+                
+                # Skip non-gesture categories
+                if raw_label == 'N/A' or raw_label.lower() == 'move':
+                    continue
+                
+                # Map to standard category
+                category = CATEGORY_MAPPINGS.get(dataset, {}).get(raw_label)
+                if category is None:
+                    # Try case-insensitive
+                    for key, value in CATEGORY_MAPPINGS.get(dataset, {}).items():
+                        if key.lower() == raw_label.lower():
+                            category = value
+                            break
+                    if category is None:
+                        category = f"gesture_{raw_label.lower()}"
+                
+                # Convert to frame indices
+                start_frame = max(0, int(start_time * FPS))
+                end_frame = min(int(end_time * FPS), total_frames)
+                
+                for frame in range(start_frame, end_frame):
+                    category_frames[category].append(frame)
+        
+        print(f"  Found {len(category_frames)} gesture subtypes")
+        
+        # Calculate metrics for each category and each model
+        for category, frames in category_frames.items():
+            if not frames:
+                continue
+            
+            frame_count = len(frames)
+            
+            # Create binary ground truth for this category
+            category_gt = np.zeros(total_frames)
+            category_gt[frames] = 1
+            
+            # Evaluate both models
+            for model_name, pred_labels in [('CNN', cnn_labels), ('LightGBM', lgbm_labels)]:
+                category_pred = np.array([1 if label == 'gesture' else 0 for label in pred_labels])
+                
+                try:
+                    precision = precision_score(category_gt, category_pred, zero_division=0)
+                    recall = recall_score(category_gt, category_pred, zero_division=0)
+                    f1 = f1_score(category_gt, category_pred, zero_division=0)
+                    
+                    results[model_name]['by_category'][category]['precision'].append(precision)
+                    results[model_name]['by_category'][category]['recall'].append(recall)
+                    results[model_name]['by_category'][category]['f1'].append(f1)
+                    results[model_name]['by_category'][category]['num_frames'].append(frame_count)
+                except Exception as e:
+                    print(f"  Error for {category} ({model_name}): {e}")
+    
+    # Compute averages and create final results
+    final_results = {}
+    for model_name in ['CNN', 'LightGBM']:
+        final_results[model_name] = {'by_category': {}}
+        for category, metrics in results[model_name]['by_category'].items():
+            final_results[model_name]['by_category'][category] = {
+                'precision': np.mean(metrics['precision']) if metrics['precision'] else 0,
+                'recall': np.mean(metrics['recall']) if metrics['recall'] else 0,
+                'f1': np.mean(metrics['f1']) if metrics['f1'] else 0,
+                'num_frames': sum(metrics['num_frames']) if metrics['num_frames'] else 0
+            }
+    
+    return final_results
+
+
+def visualize_subtype_performance(results: Dict) -> None:
+    """Create visualization for gesture subtype performance."""
+    
+    for model_name in ['CNN', 'LightGBM']:
+        categories = list(results[model_name]['by_category'].keys())
+        if not categories:
+            print(f"  No categories to visualize for {model_name}")
+            continue
+        
+        # Calculate total frames for percentage
+        total_frames = sum(
+            results[model_name]['by_category'][cat].get('num_frames', 0)
+            for cat in categories
+        )
+        
+        # Prepare table data sorted by F1
+        table_data = []
+        for category in categories:
+            metrics = results[model_name]['by_category'][category]
+            frames = metrics.get('num_frames', 0)
+            pct = (frames / total_frames * 100) if total_frames > 0 else 0
+            table_data.append({
+                'category': category.replace('gesture_', ''),
+                'precision': metrics.get('precision', 0),
+                'recall': metrics.get('recall', 0),
+                'f1': metrics.get('f1', 0),
+                'frames': frames,
+                'percentage': pct
+            })
+        
+        # Sort by F1 descending
+        table_data.sort(key=lambda x: x['f1'], reverse=True)
+        
+        # Create table visualization
+        fig = plt.figure(figsize=(14, max(6, len(table_data) * 0.5)))
+        plt.axis('off')
+        plt.title(f'{model_name}: Performance by Gesture Subtype (Sorted by Gesture Recall)', fontsize=14)
+        
+        cell_text = [
+            [
+                row['category'],
+                f"{row['precision']:.3f}",
+                f"{row['recall']:.3f}",
+                f"{row['f1']:.3f}",
+                f"{int(row['frames'])}",
+                f"{row['percentage']:.1f}%"
+            ]
+            for row in table_data
+        ]
+        
+        plt.table(
+            cellText=cell_text,
+            colLabels=['Subtype', 'Gesture\nPrecision', 'Gesture\nRecall', 'Gesture\nF1', 'Frame\nCount', '% of\nTotal'],
+            loc='center',
+            cellLoc='center',
+            colWidths=[0.18, 0.14, 0.14, 0.14, 0.14, 0.12]
+        )
+        plt.savefig(f'subtype_performance_{model_name.lower()}.png', bbox_inches='tight', dpi=300)
+        plt.close()
+        
+        print(f"  Saved subtype_performance_{model_name.lower()}.png")
+        
+        # Create bar chart
+        if len(table_data) > 1:
+            fig, ax = plt.subplots(figsize=(12, max(6, len(table_data) * 0.4)))
+            
+            y_pos = np.arange(len(table_data))
+            colors = plt.cm.RdYlGn([row['recall'] for row in table_data])
+            
+            bars = ax.barh(y_pos, [row['recall'] for row in table_data], color=colors, alpha=0.7)
+            ax.set_yticks(y_pos)
+            ax.set_yticklabels([row['category'] for row in table_data])
+            ax.set_xlabel('Gesture Recall (Detection Rate)')
+            ax.set_title(f'{model_name}: Gesture Subtype Detection Rate')
+            ax.set_xlim(0, 1)
+            ax.grid(axis='x', alpha=0.3)
+            
+            # Add frame count labels
+            for i, (bar, row) in enumerate(zip(bars, table_data)):
+                ax.text(bar.get_width() + 0.02, bar.get_y() + bar.get_height()/2,
+                       f"{int(row['frames'])} frames ({row['percentage']:.1f}%)",
+                       va='center', fontsize=9)
+            
+            plt.tight_layout()
+            plt.savefig(f'subtype_recall_{model_name.lower()}.png', bbox_inches='tight', dpi=300)
+            plt.close()
+            
+            print(f"  Saved subtype_recall_{model_name.lower()}.png")
+    
+    # Create comparison table
+    all_categories = set()
+    for model_name in ['CNN', 'LightGBM']:
+        all_categories.update(results[model_name]['by_category'].keys())
+    
+    if all_categories:
+        comparison_data = []
+        for category in sorted(all_categories):
+            cnn_metrics = results['CNN']['by_category'].get(category, {})
+            lgbm_metrics = results['LightGBM']['by_category'].get(category, {})
+            
+            comparison_data.append({
+                'Subtype': category.replace('gesture_', ''),
+                'CNN_Recall': cnn_metrics.get('recall', 0),
+                'CNN_F1': cnn_metrics.get('f1', 0),
+                'LGBM_Recall': lgbm_metrics.get('recall', 0),
+                'LGBM_F1': lgbm_metrics.get('f1', 0),
+                'Frames': max(cnn_metrics.get('num_frames', 0), lgbm_metrics.get('num_frames', 0))
+            })
+        
+        comparison_df = pd.DataFrame(comparison_data)
+        comparison_df.to_csv('subtype_comparison.csv', index=False)
+        print(f"  Saved subtype_comparison.csv")
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -1165,18 +1637,32 @@ def main():
     cnn_analysis['params_avg'].to_csv('all_parameter_combinations_cnn.csv', index=False, float_format='%.3f')
     lgbm_analysis['params_avg'].to_csv('all_parameter_combinations_lgbm.csv', index=False, float_format='%.3f')
     
-    # Print best parameters
+    # Print best parameters with both metric types
     print("\n  CNN Best Parameters:")
     if cnn_analysis['best_params'] is not None:
         for col in cnn_param_cols:
             print(f"    {col}: {cnn_analysis['best_params'][col]:.2f}")
+        print(f"    --- Gesture-Class Metrics ---")
+        print(f"    Gesture Accuracy: {cnn_analysis['best_params'].get('gesture_accuracy', 0):.3f}")
+        print(f"    Gesture Precision: {cnn_analysis['best_params'].get('gesture_precision', 0):.3f}")
+        print(f"    Gesture Recall: {cnn_analysis['best_params'].get('gesture_recall', 0):.3f}")
         print(f"    Gesture F1: {cnn_analysis['best_params'].get('gesture_f1', 0):.3f}")
+        print(f"    --- Overall Weighted Metrics ---")
+        print(f"    Overall Accuracy: {cnn_analysis['best_params'].get('accuracy', 0):.3f}")
+        print(f"    Overall F1: {cnn_analysis['best_params'].get('f1', 0):.3f}")
     
     print("\n  LightGBM Best Parameters:")
     if lgbm_analysis['best_params'] is not None:
         for col in lgbm_param_cols:
             print(f"    {col}: {lgbm_analysis['best_params'][col]:.2f}")
+        print(f"    --- Gesture-Class Metrics ---")
+        print(f"    Gesture Accuracy: {lgbm_analysis['best_params'].get('gesture_accuracy', 0):.3f}")
+        print(f"    Gesture Precision: {lgbm_analysis['best_params'].get('gesture_precision', 0):.3f}")
+        print(f"    Gesture Recall: {lgbm_analysis['best_params'].get('gesture_recall', 0):.3f}")
         print(f"    Gesture F1: {lgbm_analysis['best_params'].get('gesture_f1', 0):.3f}")
+        print(f"    --- Overall Weighted Metrics ---")
+        print(f"    Overall Accuracy: {lgbm_analysis['best_params'].get('accuracy', 0):.3f}")
+        print(f"    Overall F1: {lgbm_analysis['best_params'].get('f1', 0):.3f}")
     
     # Create plots
     plot_results(cnn_analysis, 'CNN', cnn_param_cols)
@@ -1190,6 +1676,9 @@ def main():
     print("STEP 6: Creating Segment Correlation Plots")
     print("=" * 70)
     
+    cnn_best_dict = None
+    lgbm_best_dict = None
+    
     if cnn_analysis['best_params'] is not None:
         cnn_best_dict = {col: cnn_analysis['best_params'][col] for col in cnn_param_cols}
         plot_segment_correlation(pairs, cnn_best_dict, 'CNN')
@@ -1197,6 +1686,11 @@ def main():
     if lgbm_analysis['best_params'] is not None:
         lgbm_best_dict = {col: lgbm_analysis['best_params'][col] for col in lgbm_param_cols}
         plot_segment_correlation(pairs, lgbm_best_dict, 'LightGBM')
+    
+    # Gesture subtype analysis
+    if cnn_best_dict is not None and lgbm_best_dict is not None:
+        subtype_results = evaluate_gesture_subtypes(cnn_best_dict, lgbm_best_dict)
+        visualize_subtype_performance(subtype_results)
     
     # Print summary
     print("\n" + "=" * 70)
@@ -1213,6 +1707,8 @@ def main():
     print("    - class_metrics_cnn.png")
     print("    - segment_correlation_cnn.png")
     print("    - segment_correlation_data_cnn.csv")
+    print("    - subtype_performance_cnn.png")
+    print("    - subtype_recall_cnn.png")
     print("  LightGBM:")
     print("    - all_test_results_lgbm.csv")
     print("    - all_parameter_combinations_lgbm.csv")
@@ -1223,9 +1719,12 @@ def main():
     print("    - class_metrics_lgbm.png")
     print("    - segment_correlation_lgbm.png")
     print("    - segment_correlation_data_lgbm.csv")
+    print("    - subtype_performance_lgbm.png")
+    print("    - subtype_recall_lgbm.png")
     print("  Comparison:")
     print("    - model_comparison.png")
     print("    - model_comparison.csv")
+    print("    - subtype_comparison.csv")
 
 
 if __name__ == '__main__':
