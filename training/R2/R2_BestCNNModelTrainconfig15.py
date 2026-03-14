@@ -1,20 +1,9 @@
 # ============================================================================
-# BEST MODEL TRAINING - Config 18 (World Landmarks, 1-Fold)
+# BEST MODEL TRAINING - Config 15 (World Landmarks, 1-Fold)
 # ============================================================================
 # Trains the best performing model configuration on ALL data (no validation split)
 # Use this for final production model after hyperparameter search is complete.
-#
-# Best Config (from hypersearch):
-#   - Dataset: World landmarks (92 features)
-#   - Architecture: Residual CNN (48, 96, 192 filters)
-#   - Dense units: 128
-#   - Dropout: 0.5
-#   - Preprocessing: basic
-#
-# Usage:
-#   python R2_BestModelTrainconfig18.py
-#   python R2_BestModelTrainconfig18.py --test
-#   python R2_BestModelTrainconfig18.py --epochs 20
+
 
 import os
 import sys
@@ -41,7 +30,7 @@ from tensorflow.keras.models import Model
 # ARGUMENT PARSING
 # ============================================================================
 
-parser = argparse.ArgumentParser(description='Best Model Training (Config 18)')
+parser = argparse.ArgumentParser(description='Best Model Training (Config 15)')
 parser.add_argument('--test', action='store_true', help='Run in test mode (fast)')
 parser.add_argument('--epochs', type=int, default=15, help='Number of epochs to train')
 parser.add_argument('--output_name', type=str, default=None, help='Custom output name')
@@ -52,7 +41,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(script_dir)
 
 print("=" * 70)
-print("BEST MODEL TRAINING - Config 18 (World Landmarks)")
+print("BEST MODEL TRAINING - Config 15 (World Landmarks)")
 print("=" * 70)
 print("GPU Availability:")
 print(tf.config.list_physical_devices('GPU'))
@@ -60,7 +49,7 @@ print("=" * 70)
 
 
 # ============================================================================
-# CONFIGURATION - BEST MODEL (Config 18)
+# CONFIGURATION - BEST MODEL (Config 15)
 # ============================================================================
 
 @dataclass
@@ -92,7 +81,7 @@ class Config:
 @dataclass 
 class BestHyperparameters:
     """
-    BEST HYPERPARAMETERS from Config 18 (hypersearch winner)
+    BEST HYPERPARAMETERS from Config 15 (hypersearch winner)
     DO NOT MODIFY unless you have new hypersearch results!
     """
     # Preprocessing
@@ -251,7 +240,7 @@ def make_cnn_model(
     seq_length: int = 25
 ) -> Model:
     """
-    Create the BEST CNN model (Config 18).
+    Create the BEST CNN model (Config 15).
     Residual blocks with skip connections.
     """
     inputs = layers.Input(shape=(seq_length, num_features), name="input")
@@ -541,7 +530,7 @@ def train_best_model(test_run: bool = False, num_epochs: int = None):
         HYPERPARAMS.steps_per_epoch = 100
     
     print(f"\n{'='*70}")
-    print("TRAINING BEST MODEL (Config 18)")
+    print("TRAINING BEST MODEL (Config 15)")
     print(f"{'='*70}")
     print(f"Dataset: World landmarks ({CONFIG.dataset.num_features} features)")
     print(f"Architecture: Residual CNN {HYPERPARAMS.conv_filters}")
@@ -593,7 +582,7 @@ def train_best_model(test_run: bool = False, num_epochs: int = None):
     
     # Output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_name = args.output_name or f"best_model_config18_{timestamp}"
+    output_name = args.output_name or f"best_model_config15_{timestamp}"
     log_dir = Path(CONFIG.output_dir) / output_name
     log_dir.mkdir(parents=True, exist_ok=True)
     
