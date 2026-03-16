@@ -45,7 +45,7 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 
 parser = argparse.ArgumentParser(description='Best LightGBM Model Training (Config 13)')
 parser.add_argument('--test', action='store_true', help='Run in test mode (fast)')
-parser.add_argument('--n_estimators', type=int, default=1000, help='Number of trees')
+parser.add_argument('--n_estimators', type=int, default=800, help='Number of trees')
 parser.add_argument('--window_size', type=int, default=5, help='Sequence window size')
 parser.add_argument('--stride', type=int, default=2, help='Sampling stride')
 parser.add_argument('--output_name', type=str, default=None, help='Custom output name')
@@ -90,8 +90,8 @@ class BestLightGBMParams:
     """
     num_leaves: int = 63
     max_depth: int = 7
-    learning_rate: float = 0.03
-    n_estimators: int = 1000  # More trees for production (no early stopping)
+    learning_rate: float = 0.05
+    n_estimators: int = 800 # (no early stopping)
     min_data_in_leaf: int = 50
     feature_fraction: float = 0.85
     bagging_fraction: float = 0.8

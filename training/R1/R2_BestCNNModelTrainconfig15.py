@@ -84,10 +84,8 @@ class BestHyperparameters:
     BEST HYPERPARAMETERS from Config 15 (hypersearch winner)
     DO NOT MODIFY unless you have new hypersearch results!
     """
-    # Preprocessing
-    preprocessing: str = "basic"
-    
     # CNN architecture - BEST CONFIG
+    preprocessing: str = "basic"
     conv_filters: Tuple[int, int, int] = (48, 96, 192)
     conv_kernel_size: int = 3
     pool_size: int = 2
@@ -101,9 +99,9 @@ class BestHyperparameters:
     
     # Training
     learning_rate: float = 0.0001
-    batch_size: int = 64
+    batch_size: int = 32
     steps_per_epoch: int = 2000
-    epochs: int = 15  # Fixed epochs (no early stopping)
+    epochs: int = 70  # Fixed epochs (no early stopping)
     
     # Move oversampling (1.0 = no oversampling, based on your experiments)
     move_oversample_factor: float = 1.5  # Mild boost for Move class
@@ -599,7 +597,7 @@ def train_best_model(test_run: bool = False, num_epochs: int = None):
             monitor='loss',
             mode='min',
             factor=0.5,
-            patience=3,
+            patience=2,
             min_lr=1e-6,
             verbose=1
         ),
