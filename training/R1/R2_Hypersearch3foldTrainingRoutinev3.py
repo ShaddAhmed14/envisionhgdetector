@@ -72,7 +72,7 @@ class DatasetConfig:
     name: str
     npz_filename: str
     num_features: int
-    architecture: str  # 'cnn' or 'dense' (for world landmarks)
+    architecture: str  # 'cnn'
 
 
 @dataclass
@@ -104,7 +104,7 @@ class Config:
         name="world",
         npz_filename="../TrainingDataProcessed/landmarks_world_92_structured_v3.npz",
         num_features=92,
-        architecture="cnn"  # Can also try "dense"
+        architecture="cnn"
     ))
     
     # Output
@@ -117,22 +117,17 @@ CONFIG = Config()
 @dataclass
 class HyperparameterConfig:
     """Hyperparameter configuration for model training"""
-    # Preprocessing
+    # Variable Parameters
     preprocessing: str = "basic"  # "basic" or "enhanced"
+    conv_filters: Tuple[int, int, int] = (48, 96, 192)
+    dense_units: int = 128
+    dropout_rate: float = 0.5  # Was 0.3 - increased to combat overfitting
     
-    # CNN architecture
-    conv_filters: Tuple[int, int, int] = (64, 128, 256)
+    # FIXED Parameters (no longer in search)
     conv_kernel_size: int = 3
     pool_size: int = 2
     
-    # Dense layers
-    dense_units: int = 256
-    dropout_rate: float = 0.5  # Was 0.3 - increased to combat overfitting
-    
-    # Regularization - INCREASED to combat overfitting
-    l2_weight: float = 0.001
-    
-    # Training - FIXED VALUES (no longer in search)
+    l2_weight: float = 0.001 # Regularization - INCREASED to combat overfitting
     learning_rate: float = 0.0001  # Was 0.001 - reduced to prevent overshooting
     batch_size: int = 32
     steps_per_epoch: int = 2000    # have more frequent checkpoints
@@ -544,47 +539,6 @@ def make_cnn_model(
     outputs = layers.Concatenate(name="output")([has_motion, gesture_probs])
     
     return Model(inputs, outputs)
-
-def make_dense_model(
-    num_features: int,
-    num_classes: int,  # Number of motion classes (Gesture, Move) - NOT including NoGesture
-    hyperparams: HyperparameterConfig,
-    seq_length: int = 25
-) -> Model:
-    """
-    Create Dense-only model with HIERARCHICAL output (alternative for world landmarks).
-    - has_motion: binary (0=NoGesture, 1=Motion)
-    - gesture_probs: softmax over motion types (Gesture, Move)
-    """
-    
-    inputs = layers.Input(shape=(seq_length, num_features), name="input")
-    
-    # Preprocessing
-    if hyperparams.preprocessing == "enhanced":
-        x = EnhancedPreprocessing()(inputs)
-    else:
-        x = BasicPreprocessing()(inputs)
-    
-    # Flatten and dense layers with regularization
-    x = layers.Flatten()(x)
-    x = layers.Dropout(hyperparams.dropout_rate)(x)
-    
-    x = layers.Dense(512, activation="relu", 
-                    kernel_regularizer=regularizers.l2(hyperparams.l2_weight))(x)
-    x = layers.BatchNormalization()(x)
-    x = layers.Dropout(hyperparams.dropout_rate)(x)
-    
-    x = layers.Dense(hyperparams.dense_units, activation="relu",
-                    kernel_regularizer=regularizers.l2(hyperparams.l2_weight))(x)
-    x = layers.Dropout(hyperparams.dropout_rate)(x)
-    
-    # HIERARCHICAL OUTPUT
-    has_motion = layers.Dense(1, activation="sigmoid", name="has_motion")(x)
-    gesture_probs = layers.Dense(num_classes, activation="softmax", name="gesture_probs")(x)
-    outputs = layers.Concatenate(name="output")([has_motion, gesture_probs])
-    
-    return Model(inputs, outputs)
-
 
 # ============================================================================
 # LOSS AND METRICS
@@ -1247,16 +1201,7 @@ def train_fold(
     print(f"Hierarchical output: has_motion (1) + gesture_probs ({n_motion_classes})")
     print(f"{'='*70}")
     
-    # Create model (num_classes = number of MOTION classes, not total)
-    if dataset_config.architecture == "dense":
-        model = make_dense_model(
-            num_features=dataset_config.num_features,
-            num_classes=n_motion_classes,  # 2: Gesture, Move
-            hyperparams=hyperparams,
-            seq_length=CONFIG.seq_length
-        )
-    else:
-        model = make_cnn_model(
+    model = make_cnn_model(
             num_features=dataset_config.num_features,
             num_classes=n_motion_classes,  # 2: Gesture, Move
             hyperparams=hyperparams,
